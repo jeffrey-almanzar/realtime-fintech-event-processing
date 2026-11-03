@@ -9,6 +9,11 @@ type Kafka struct {
 	Topic            string
 	DLQTopic         string
 	GroupID          string
+	// GroupInstanceID enables static group membership when set: a consumer
+	// that restarts with the same ID gets its partitions back immediately
+	// instead of waiting for a rebalance. Each running instance needs a
+	// unique, stable ID (e.g. a StatefulSet pod name).
+	GroupInstanceID string
 }
 
 // LoadKafka reads Kafka settings from the environment, falling back to
@@ -19,6 +24,7 @@ func LoadKafka() Kafka {
 		Topic:            getEnv("KAFKA_TOPIC", "transactions"),
 		DLQTopic:         getEnv("KAFKA_DLQ_TOPIC", "transactions.dlq"),
 		GroupID:          getEnv("KAFKA_GROUP_ID", "transaction-processor"),
+		GroupInstanceID:  getEnv("KAFKA_GROUP_INSTANCE_ID", ""),
 	}
 }
 

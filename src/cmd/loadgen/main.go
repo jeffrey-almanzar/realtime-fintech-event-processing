@@ -3,6 +3,9 @@
 // processor and shown in Grafana.
 //
 //	go run ./src/cmd/loadgen -rate 200 -duration 60s
+//
+// With -record, the IDs of accepted events are written to a file (one per
+// line) so you can check afterwards that every one of them was applied.
 
 package main
 
@@ -14,10 +17,14 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -26,7 +33,14 @@ func main() {
 	duration := flag.Duration("duration", 30*time.Second, "how long to send")
 	accounts := flag.Int("accounts", 1000, "number of distinct account IDs")
 	workers := flag.Int("workers", 64, "concurrent HTTP clients")
+	debits := flag.Bool("debits", false, "include withdrawals and transfers out (some will be rejected for insufficient funds)")
+	record := flag.String("record", "", "file to write accepted event IDs to")
 	flag.Parse()
+
+	types := []string{"deposit", "transfer_in"}
+	if *debits {
+		types = []string{"deposit", "deposit", "deposit", "withdrawal", "transfer_in", "transfer_out"}
+	}
 
 	client := &http.Client{
 		Timeout:   5 * time.Second,
@@ -37,6 +51,7 @@ func main() {
 		ok, failed, dropped atomic.Int64
 		mu                  sync.Mutex
 		latencies           []time.Duration
+		accepted            []string
 	)
 
 	jobs := make(chan struct{}, *workers)
@@ -45,7 +60,8 @@ func main() {
 		wg.Go(func() {
 			for range jobs {
 				start := time.Now()
-				if err := send(client, *url, *accounts); err != nil {
+				id := uuid.NewString()
+				if err := send(client, *url, id, types, *accounts); err != nil {
 					failed.Add(1)
 					continue
 				}
@@ -53,6 +69,7 @@ func main() {
 				ok.Add(1)
 				mu.Lock()
 				latencies = append(latencies, elapsed)
+				accepted = append(accepted, id)
 				mu.Unlock()
 			}
 		})
@@ -88,12 +105,17 @@ loop:
 		fmt.Printf("API latency:  p50=%s p95=%s p99=%s max=%s\n",
 			pct(latencies, 0.50), pct(latencies, 0.95), pct(latencies, 0.99), latencies[len(latencies)-1])
 	}
+	if *record != "" {
+		if err := os.WriteFile(*record, []byte(strings.Join(accepted, "\n")+"\n"), 0o644); err != nil {
+			log.Fatalf("Failed to write %s: %v", *record, err)
+		}
+		fmt.Printf("recorded:     %d accepted event IDs in %s\n", len(accepted), *record)
+	}
 }
 
-var types = []string{"deposit", "deposit", "deposit", "withdrawal", "transfer_in", "transfer_out"}
-
-func send(client *http.Client, url string, accounts int) error {
+func send(client *http.Client, url, eventID string, types []string, accounts int) error {
 	body, err := json.Marshal(map[string]any{
+		"event_id":     eventID,
 		"account_id":   fmt.Sprintf("acct-%d", rand.IntN(accounts)),
 		"type":         types[rand.IntN(len(types))],
 		"amount_minor": rand.Int64N(100_000) + 1,

@@ -4,15 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
-	"regexp"
 
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fintechv1 "github.com/jeffrey-almanzar/realtime-fintech-event-processing/src/gen/fintech/v1"
+	"github.com/jeffrey-almanzar/realtime-fintech-event-processing/src/pkg/events"
 )
 
 // Publisher sends a validated transaction to the event log.
@@ -37,39 +36,30 @@ var transactionTypes = map[string]fintechv1.TransactionType{
 	"transfer_out": fintechv1.TransactionType_TRANSACTION_TYPE_TRANSFER_OUT,
 }
 
-var currencyCode = regexp.MustCompile(`^[A-Z]{3}$`)
-
 // toTransaction validates the request and converts it to the event schema.
 func (r transactionRequest) toTransaction() (*fintechv1.Transaction, error) {
-	if r.AccountID == "" {
-		return nil, errors.New("account_id is required")
-	}
 	txType, ok := transactionTypes[r.Type]
 	if !ok {
-		return nil, fmt.Errorf("type must be one of deposit, withdrawal, transfer_in, transfer_out")
-	}
-	if r.AmountMinor <= 0 {
-		return nil, errors.New("amount_minor must be a positive integer")
-	}
-	if !currencyCode.MatchString(r.Currency) {
-		return nil, errors.New("currency must be a 3-letter ISO 4217 code, e.g. USD")
+		return nil, errors.New("type must be one of deposit, withdrawal, transfer_in, transfer_out")
 	}
 
 	eventID := r.EventID
 	if eventID == "" {
 		eventID = uuid.NewString()
-	} else if _, err := uuid.Parse(eventID); err != nil {
-		return nil, errors.New("event_id must be a UUID")
 	}
 
-	return &fintechv1.Transaction{
+	tx := &fintechv1.Transaction{
 		EventId:     eventID,
 		AccountId:   r.AccountID,
 		Type:        txType,
 		AmountMinor: r.AmountMinor,
 		Currency:    r.Currency,
 		CreatedAt:   timestamppb.Now(),
-	}, nil
+	}
+	if err := events.Validate(tx); err != nil {
+		return nil, err
+	}
+	return tx, nil
 }
 
 // handleCreateTransaction accepts a transaction and responds once Kafka has

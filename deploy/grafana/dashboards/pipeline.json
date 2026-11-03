@@ -62,6 +62,18 @@
         { "refId": "A", "legendFormat": "{{http_response_status_code}}", "expr": "sum by (http_response_status_code) (rate(http_server_request_duration_seconds_count[30s]))" },
         { "refId": "B", "legendFormat": "p99 latency", "expr": "1000 * histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket[30s])))" }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Dead-lettered events and retries",
+      "description": "Dead-lettered: events that can never succeed, by reason. Retries: transient errors (e.g. Postgres unavailable).",
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "legendFormat": "DLQ: {{reason}}", "expr": "sum by (reason) (rate(transactions_processed_total{result=\"dead_lettered\"}[30s]))" },
+        { "refId": "B", "legendFormat": "retry: {{operation}}", "expr": "sum by (operation) (rate(transactions_retries_total[30s]))" }
+      ]
     }
   ]
 }

@@ -1,4 +1,4 @@
-.PHONY: up down logs build test lint proto migrate run-api run-processor loadgen
+.PHONY: up down logs build test test-integration lint proto migrate run-api run-processor loadgen dlq dlq-replay
 
 up: ## Start the local stack, create topics, and run migrations
 	docker compose up -d --wait kafka postgres kafka-ui otel-collector jaeger prometheus grafana
@@ -14,12 +14,15 @@ logs:
 build:
 	go build ./...
 
-test:
+test: ## Unit tests (no Docker needed)
 	go test ./...
+
+test-integration: ## Integration tests against real Kafka and Postgres (needs Docker)
+	go test -tags integration -count=1 ./...
 
 lint:
 	go vet ./...
-	golangci-lint run ./...
+	golangci-lint run --build-tags integration ./...
 	buf lint
 
 proto: ## Regenerate Go code from proto/
@@ -36,3 +39,9 @@ run-processor:
 
 loadgen: ## e.g. make loadgen ARGS="-rate 200 -duration 60s"
 	go run ./src/cmd/loadgen $(ARGS)
+
+dlq: ## List dead-lettered events
+	go run ./src/cmd/dlq
+
+dlq-replay: ## Republish dead-lettered events to the main topic
+	go run ./src/cmd/dlq -replay

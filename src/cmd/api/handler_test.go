@@ -80,6 +80,7 @@ func TestCreateTransactionValidation(t *testing.T) {
 		"negative amount":  `{"account_id":"a","type":"deposit","amount_minor":-5,"currency":"USD"}`,
 		"float amount":     `{"account_id":"a","type":"deposit","amount_minor":1.5,"currency":"USD"}`,
 		"bad currency":     `{"account_id":"a","type":"deposit","amount_minor":1,"currency":"usd"}`,
+		"unsupported cur.": `{"account_id":"a","type":"deposit","amount_minor":1,"currency":"XYZ"}`,
 		"non-UUID eventID": `{"event_id":"abc","account_id":"a","type":"deposit","amount_minor":1,"currency":"USD"}`,
 	}
 	for name, body := range tests {

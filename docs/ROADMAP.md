@@ -50,15 +50,17 @@ Build a thin end-to-end pipeline early, then make it correct, then make it fast.
 
 ## Phase 3: Correctness
 
+**Status:** ✅ Complete (saturation ~1,700–2,000 events/s, up from ~650; chaos test: 0 lost, 0 double-applied)
+
 **Goal:** The pipeline stays correct when things go wrong.
 
-- [ ] **Idempotency:** insert `event_id` into `processed_events` in the same DB transaction as the balance update; skip duplicates
-- [ ] **Ordering:** one goroutine per partition; document why this gives per-account ordering
-- [ ] **Retries:** a bounded number with backoff for transient errors (e.g. DB timeouts); invalid events go straight to the DLQ
-- [ ] **DLQ:** route failures to `transactions.dlq` with the error reason in headers; add a small replay tool
-- [ ] **Graceful shutdown:** on SIGTERM, finish in-flight messages, commit offsets, and close cleanly
-- [ ] **Business rules:** reject overdrafts, unknown currencies, etc.
-- [ ] **Tests:** unit tests for processing logic; integration tests with Testcontainers covering duplicate delivery, a crash before commit, and DLQ routing
+- [x] **Idempotency:** insert `event_id` into `processed_events` in the same DB transaction as the balance update; skip duplicates
+- [x] **Ordering:** one goroutine per partition; document why this gives per-account ordering
+- [x] **Retries:** a bounded number with backoff for transient errors (e.g. DB timeouts); invalid events go straight to the DLQ
+- [x] **DLQ:** route failures to `transactions.dlq` with the error reason in headers; add a small replay tool
+- [x] **Graceful shutdown:** on SIGTERM, finish in-flight messages, commit offsets, and close cleanly
+- [x] **Business rules:** reject overdrafts, unknown currencies, etc.
+- [x] **Tests:** unit tests for processing logic; integration tests with Testcontainers covering duplicate delivery, a crash before commit, and DLQ routing
 
 **Done when:** Killing the processor mid-load and restarting it leaves balances exactly correct, with no double-applied or lost events, proven by a test.
 
