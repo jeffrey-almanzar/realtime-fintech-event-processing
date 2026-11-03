@@ -1,0 +1,9 @@
+{
+	"name": "GoLang DevContainer",
+	"dockerFile": "Dockerfile",
+	"settings": {},
+	"extensions": ["golang.go", "ms-kubernetes-tools.vscode-kubernetes-tools"],
+	"forwardPorts": [9092],
+	"postCreateCommand": "go mod tidy",
+	"remoteUser": "vscode"
+}
