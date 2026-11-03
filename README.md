@@ -6,7 +6,7 @@
 
 **Technologies:** Go, Kafka, PostgreSQL / Redis, Temporal, OpenTelemetry, Prometheus / Grafana, Kubernetes
 
-**Status:** 🚧 Early scaffold. A basic Kafka producer/consumer and stub Temporal/OpenTelemetry packages exist. The targets below are goals, not measured results yet.
+**Status:** 🚧 Phase 1 (Foundations) complete: the local stack runs, events are defined in Protobuf, and a producer/consumer exchange them through Kafka. The targets below are goals, not measured results yet.
 
 ## Goals and Targets
 
@@ -64,19 +64,28 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 
 ```
 .
-├── docker-compose.yml           # Local Kafka + Zookeeper
-├── .devcontainer/               # VS Code dev container config
+├── Makefile                     # make up / down / build / test / lint / proto
+├── docker-compose.yml           # Kafka (KRaft), Postgres, OTel Collector, Prometheus, Grafana, Kafka UI
+├── buf.yaml, buf.gen.yaml       # Protobuf lint and code generation config
+├── proto/fintech/v1/            # Event schemas (source of truth)
+├── deploy/                      # Config for the OTel Collector, Prometheus, Grafana
+├── docs/ROADMAP.md              # Phase-by-phase task checklist
 ├── loadtest/k6.js               # Load test script
+├── .github/workflows/ci.yml     # Build, vet, test, lint on every push
 └── src/
     ├── cmd/
     │   ├── producer/main.go     # Kafka producer (to become the Event API)
     │   └── consumer/main.go     # Kafka consumer (to become the Processor)
+    ├── gen/fintech/v1/          # Generated Protobuf code (do not edit; run `make proto`)
     └── pkg/
+        ├── config/              # Environment-based configuration
         ├── workflow/temporal.go # Temporal worker setup
         └── telemetry/otel.go    # OpenTelemetry setup
 ```
 
 ## Phased Plan
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed task checklist and done-when criteria for each phase.
 
 1. **Phase 1 – Foundations:** Add `go.mod`, define the event schema, and modernize the local stack (Kafka in KRaft mode, Postgres, OTel Collector, Prometheus, Grafana) in `docker-compose.yml`.
 2. **Phase 2 – Core pipeline + observability:** Event API → Kafka → Processor → Postgres, with OpenTelemetry tracing and the end-to-end latency histogram in place from the start. Measure a baseline.
@@ -88,20 +97,41 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 
 ## Local Environment
 
-1. **Start the services:**
-   ```bash
-   docker-compose up -d
-   docker-compose ps
-   ```
-2. **Configure the app:** Set `bootstrap.servers` to `localhost:9092`.
-3. **Run the producer and consumer:**
-   ```bash
-   go run ./src/cmd/consumer
-   go run ./src/cmd/producer
-   ```
-4. **Verify:** The consumer should log the received messages. Use `docker-compose logs kafka` to check broker activity.
+**Prerequisites:** Go (see `go.mod` for the version), Docker, [buf](https://buf.build/docs/installation), `protoc-gen-go`, and `golangci-lint`.
 
-> The current compose file uses Zookeeper-based Kafka images. Phase 1 replaces them with Kafka in KRaft mode and adds Postgres and the observability stack.
+1. **Start the stack and create the topics:**
+   ```bash
+   make up
+   ```
+2. **Run the consumer and producer** (in separate terminals):
+   ```bash
+   make run-consumer
+   make run-producer
+   ```
+   The producer sends 10 sample `Transaction` events; the consumer logs each one with its latency.
+3. **Explore:**
+
+   | Service | URL |
+   | --- | --- |
+   | Kafka UI (topics, messages, consumer groups) | http://localhost:8080 |
+   | Grafana | http://localhost:3000 |
+   | Prometheus | http://localhost:9090 |
+   | Kafka (from the host) | `localhost:9092` |
+   | Postgres | `localhost:5432` (user/password/db: `fintech`) |
+   | OTLP endpoint | `localhost:4317` (gRPC), `localhost:4318` (HTTP) |
+
+4. **Stop:** `make down` (use `docker compose down -v` to also delete the Postgres data).
+
+**Configuration** is read from environment variables:
+
+| Variable | Default |
+| --- | --- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` |
+| `KAFKA_TOPIC` | `transactions` |
+| `KAFKA_DLQ_TOPIC` | `transactions.dlq` |
+| `KAFKA_GROUP_ID` | `transaction-processor` |
+
+**Changing the event schema:** edit `proto/fintech/v1/*.proto`, then run `make proto` and commit the regenerated code.
 
 ## Cloud Deployment
 

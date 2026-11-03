@@ -1,9 +1,15 @@
 {
 	"name": "GoLang DevContainer",
-	"dockerFile": "Dockerfile",
-	"settings": {},
-	"extensions": ["golang.go", "ms-kubernetes-tools.vscode-kubernetes-tools"],
-	"forwardPorts": [9092],
-	"postCreateCommand": "go mod tidy",
+	"image": "mcr.microsoft.com/devcontainers/go:1",
+	"features": {
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": ["golang.go", "ms-kubernetes-tools.vscode-kubernetes-tools", "bufbuild.vscode-buf"]
+		}
+	},
+	"forwardPorts": [9092, 8080, 3000, 9090],
+	"postCreateCommand": "go mod download",
 	"remoteUser": "vscode"
 }

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package fintech.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/jeffrey-almanzar/realtime-fintech-event-processing/src/gen/fintech/v1;fintechv1";
+
+// A financial event published to the "transactions" topic.
+// Messages are keyed by account_id so all events for an account land on the
+// same partition and are processed in order.
+message Transaction {
+  // Globally unique ID, used by consumers to deduplicate redelivered events.
+  string event_id = 1;
+  string account_id = 2;
+  TransactionType type = 3;
+  // Amount in the currency's minor unit (e.g. cents). Never use floats for money.
+  int64 amount_minor = 4;
+  // ISO 4217 currency code, e.g. "USD".
+  string currency = 5;
+  // Set by the producer; used to measure end-to-end latency.
+  google.protobuf.Timestamp created_at = 6;
+}
+
+enum TransactionType {
+  TRANSACTION_TYPE_UNSPECIFIED = 0;
+  TRANSACTION_TYPE_DEPOSIT = 1;
+  TRANSACTION_TYPE_WITHDRAWAL = 2;
+  TRANSACTION_TYPE_TRANSFER_IN = 3;
+  TRANSACTION_TYPE_TRANSFER_OUT = 4;
+}

@@ -1,18 +1,23 @@
 // Defines a Temporal workflow to ensure data consistency.
+// Wired up in Phase 6; kept compiling until then.
 
 package workflow
 
 import (
+	"context"
+	"log"
+
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
-	"log"
+	"go.temporal.io/sdk/workflow"
 )
 
 func StartTemporalWorker() {
-	c, err := client.NewClient(client.Options{})
+	c, err := client.Dial(client.Options{})
 	if err != nil {
 		log.Fatalf("Unable to create Temporal client: %v", err)
 	}
+	defer c.Close()
 
 	w := worker.New(c, "financial-task-queue", worker.Options{})
 
