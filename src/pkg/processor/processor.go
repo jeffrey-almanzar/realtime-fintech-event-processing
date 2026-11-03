@@ -144,10 +144,22 @@ func New(ctx context.Context, cfg Config) (*Processor, error) {
 // Run processes events until ctx is cancelled (returns nil) or a worker hits
 // an error it can't recover from (returns that error). Either way it stops
 // the workers, commits stored offsets, and releases all connections.
-func (p *Processor) Run(ctx context.Context) error {
-	defer p.close()
+func (p *Processor) Run(ctx context.Context) (err error) {
+	defer func() {
+		p.close()
+		// A worker can fail while shutdown is already under way. close()
+		// waits for every worker, and a failing worker reports before it
+		// exits, so any such error is in p.errs by now. Don't hide it behind
+		// a clean exit.
+		if err == nil {
+			select {
+			case err = <-p.errs:
+			default:
+			}
+		}
+	}()
 
-	err := p.consumer.SubscribeTopics([]string{p.cfg.Kafka.Topic}, func(c *kafka.Consumer, ev kafka.Event) error {
+	err = p.consumer.SubscribeTopics([]string{p.cfg.Kafka.Topic}, func(c *kafka.Consumer, ev kafka.Event) error {
 		return p.rebalance(ctx, c, ev)
 	})
 	if err != nil {
