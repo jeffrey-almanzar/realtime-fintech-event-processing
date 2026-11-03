@@ -6,7 +6,7 @@
 
 **Technologies:** Go, Kafka, PostgreSQL / Redis, Temporal, OpenTelemetry, Prometheus / Grafana, Kubernetes
 
-**Status:** 🚧 Phase 1 (Foundations) complete: the local stack runs, events are defined in Protobuf, and a producer/consumer exchange them through Kafka. The targets below are goals, not measured results yet.
+**Status:** 🚧 Phase 2 (Core pipeline + observability) complete: events flow from the Event API through Kafka to the Processor and into Postgres, with end-to-end tracing, latency and lag metrics, and a measured baseline. The targets below are goals; see [Baseline](#baseline-phase-2) for current numbers.
 
 ## Goals and Targets
 
@@ -22,6 +22,22 @@ The main metric is **end-to-end latency**: the time from when an event is create
 | Saturation point | Identify and document | Increase load step by step until p99 latency or lag stops being stable |
 
 A baseline is measured first (a naive synchronous implementation) so that any improvement claimed is backed by numbers.
+
+### Baseline (Phase 2)
+
+Single Processor instance handling one message at a time (one Postgres transaction per event), everything running locally in Docker on a laptop. Generated with `make loadgen` for 60 s per run, 1,000 accounts.
+
+| Load | Event API p50 / p99 | End-to-end p50 / p95 / p99 | Max consumer lag |
+| --- | --- | --- | --- |
+| 100 events/s | 7.3 / 26 ms | 8 / 20 / 73 ms | 0 |
+| 300 events/s | 6.4 / 14 ms | 8 / 19 / 83 ms | 5 |
+| 1,000 events/s | 5.8 / 22 ms | > 5 s (saturated) | ~23,000 |
+
+- **Saturation point:** about **650 events/s**. Beyond that, lag grows and latency is dominated by time spent waiting in Kafka.
+- **Bottleneck:** sequential database round trips (BEGIN, two INSERTs, COMMIT) for every event. The Event API is not the limit.
+- End-to-end percentiles are estimated from histogram buckets, so they are approximate.
+
+These numbers are the starting point for Phase 3 (per-partition concurrency) and Phase 5 (batching and tuning).
 
 ## Architecture
 
@@ -65,17 +81,19 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 ```
 .
 ├── Makefile                     # make up / down / build / test / lint / proto
-├── docker-compose.yml           # Kafka (KRaft), Postgres, OTel Collector, Prometheus, Grafana, Kafka UI
+├── docker-compose.yml           # Kafka (KRaft), Postgres, OTel Collector, Jaeger, Prometheus, Grafana, Kafka UI
 ├── buf.yaml, buf.gen.yaml       # Protobuf lint and code generation config
 ├── proto/fintech/v1/            # Event schemas (source of truth)
-├── deploy/                      # Config for the OTel Collector, Prometheus, Grafana
+├── migrations/                  # Postgres schema (golang-migrate)
+├── deploy/                      # Config for the OTel Collector, Prometheus, Grafana (incl. dashboard)
 ├── docs/ROADMAP.md              # Phase-by-phase task checklist
 ├── loadtest/k6.js               # Load test script
 ├── .github/workflows/ci.yml     # Build, vet, test, lint on every push
 └── src/
     ├── cmd/
-    │   ├── producer/main.go     # Kafka producer (to become the Event API)
-    │   └── consumer/main.go     # Kafka consumer (to become the Processor)
+    │   ├── api/                 # Event API: HTTP → validate → Kafka
+    │   ├── processor/           # Processor: Kafka → Postgres, latency and lag metrics
+    │   └── loadgen/             # Fixed-rate load generator for the Event API
     ├── gen/fintech/v1/          # Generated Protobuf code (do not edit; run `make proto`)
     └── pkg/
         ├── config/              # Environment-based configuration
@@ -99,28 +117,44 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed task checklist and done-
 
 **Prerequisites:** Go (see `go.mod` for the version), Docker, [buf](https://buf.build/docs/installation), `protoc-gen-go`, and `golangci-lint`.
 
-1. **Start the stack and create the topics:**
+1. **Start the stack, create the topics, and run migrations:**
    ```bash
    make up
    ```
-2. **Run the consumer and producer** (in separate terminals):
+2. **Run the Event API and the Processor** (in separate terminals):
    ```bash
-   make run-consumer
-   make run-producer
+   make run-api
+   make run-processor
    ```
-   The producer sends 10 sample `Transaction` events; the consumer logs each one with its latency.
-3. **Explore:**
+3. **Send a transaction:**
+   ```bash
+   curl -X POST localhost:8081/transactions \
+     -d '{"account_id":"acct-1","type":"deposit","amount_minor":5000,"currency":"USD"}'
+   # {"event_id":"..."}  (202 Accepted: stored in Kafka, applied shortly after)
+   ```
+   `type` is one of `deposit`, `withdrawal`, `transfer_in`, `transfer_out`. Amounts are in minor units (cents). Send an `event_id` (UUID) to make retries safe: the Processor applies each ID only once.
+4. **Check the balance:**
+   ```bash
+   docker compose exec postgres psql -U fintech -c "select * from accounts"
+   ```
+5. **Generate load:**
+   ```bash
+   make loadgen ARGS="-rate 200 -duration 60s"
+   ```
+6. **Explore:**
 
    | Service | URL |
    | --- | --- |
+   | Grafana: **Fintech → Transaction Pipeline** dashboard (latency, throughput, lag) | http://localhost:3000 |
+   | Jaeger: end-to-end traces (API → Kafka → Processor → Postgres) | http://localhost:16686 |
    | Kafka UI (topics, messages, consumer groups) | http://localhost:8080 |
-   | Grafana | http://localhost:3000 |
    | Prometheus | http://localhost:9090 |
+   | Event API | http://localhost:8081 |
    | Kafka (from the host) | `localhost:9092` |
    | Postgres | `localhost:5432` (user/password/db: `fintech`) |
    | OTLP endpoint | `localhost:4317` (gRPC), `localhost:4318` (HTTP) |
 
-4. **Stop:** `make down` (use `docker compose down -v` to also delete the Postgres data).
+7. **Stop:** `make down` (use `docker compose down -v` to also delete the Postgres data).
 
 **Configuration** is read from environment variables:
 
@@ -130,6 +164,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed task checklist and done-
 | `KAFKA_TOPIC` | `transactions` |
 | `KAFKA_DLQ_TOPIC` | `transactions.dlq` |
 | `KAFKA_GROUP_ID` | `transaction-processor` |
+| `DATABASE_URL` | `postgres://fintech:fintech@localhost:5432/fintech?sslmode=disable` |
+| `HTTP_ADDR` (Event API) | `:8081` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` |
 
 **Changing the event schema:** edit `proto/fintech/v1/*.proto`, then run `make proto` and commit the regenerated code.
 

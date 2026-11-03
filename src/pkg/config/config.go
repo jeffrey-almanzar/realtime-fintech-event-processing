@@ -22,6 +22,16 @@ func LoadKafka() Kafka {
 	}
 }
 
+// DatabaseURL returns the Postgres connection string.
+func DatabaseURL() string {
+	return getEnv("DATABASE_URL", "postgres://fintech:fintech@localhost:5432/fintech?sslmode=disable")
+}
+
+// HTTPAddr returns the address the Event API listens on.
+func HTTPAddr() string {
+	return getEnv("HTTP_ADDR", ":8081")
+}
+
 func getEnv(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v

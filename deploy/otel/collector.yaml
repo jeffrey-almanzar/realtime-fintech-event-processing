@@ -13,9 +13,11 @@ exporters:
   # Metrics are exposed for Prometheus to scrape.
   prometheus:
     endpoint: 0.0.0.0:8889
-  # Traces are logged until a tracing backend is added in Phase 2.
-  debug:
-    verbosity: basic
+  # Traces go to Jaeger, which Grafana also reads from.
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
 
 service:
   pipelines:
@@ -26,4 +28,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [otlp_grpc/jaeger]

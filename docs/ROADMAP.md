@@ -30,15 +30,17 @@ Build a thin end-to-end pipeline early, then make it correct, then make it fast.
 
 ## Phase 2: Core Pipeline + Observability
 
+**Status:** ✅ Complete (baseline: ~650 events/s saturation; see README)
+
 **Goal:** One event flows from API to database, and you can see it happen.
 
-- [ ] **Event API** (`cmd/api`): `POST /transactions` validates input, stamps `created_at`, and produces to Kafka keyed by `account_id`; check delivery reports
-- [ ] **Processor** (`cmd/processor`): consume, apply the event to an `accounts` balance table in Postgres, commit the offset after the write
-- [ ] Database migrations (e.g. `golang-migrate`) for `accounts` and `processed_events`
-- [ ] OpenTelemetry tracing on the API and processor, with trace context passed through Kafka headers so one trace covers API → Kafka → processor → DB
-- [ ] End-to-end latency histogram (`processed_at - created_at`) and a consumer lag metric
-- [ ] Grafana dashboard: throughput, latency (p50/p95/p99), and lag
-- [ ] **Baseline:** a single-threaded run at a fixed rate; record the numbers in the README
+- [x] **Event API** (`cmd/api`): `POST /transactions` validates input, stamps `created_at`, and produces to Kafka keyed by `account_id`; check delivery reports
+- [x] **Processor** (`cmd/processor`): consume, apply the event to an `accounts` balance table in Postgres, commit the offset after the write
+- [x] Database migrations (e.g. `golang-migrate`) for `accounts` and `processed_events`
+- [x] OpenTelemetry tracing on the API and processor, with trace context passed through Kafka headers so one trace covers API → Kafka → processor → DB
+- [x] End-to-end latency histogram (`processed_at - created_at`) and a consumer lag metric
+- [x] Grafana dashboard: throughput, latency (p50/p95/p99), and lag
+- [x] **Baseline:** a single-threaded run at a fixed rate; record the numbers in the README
 
 **Done when:** You `curl` an event, the balance changes in Postgres, and the full trace and latency appear in Grafana.
 

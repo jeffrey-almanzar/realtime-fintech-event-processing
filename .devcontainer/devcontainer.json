@@ -9,7 +9,7 @@
 			"extensions": ["golang.go", "ms-kubernetes-tools.vscode-kubernetes-tools", "bufbuild.vscode-buf"]
 		}
 	},
-	"forwardPorts": [9092, 8080, 3000, 9090],
+	"forwardPorts": [8081, 9092, 8080, 3000, 9090, 16686],
 	"postCreateCommand": "go mod download",
 	"remoteUser": "vscode"
 }
