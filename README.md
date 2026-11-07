@@ -4,9 +4,9 @@
 
 **Solution:** A real-time event processing platform built with Go and Kafka. Financial events are ingested through an API, streamed through Kafka partitioned by account, processed idempotently, and written to a state store that users can query or subscribe to, so updates show up in milliseconds instead of seconds.
 
-**Technologies:** Go, Kafka, PostgreSQL / Redis, Temporal, OpenTelemetry, Prometheus / Grafana, Kubernetes
+**Technologies:** Go, Kafka, PostgreSQL, Temporal, OpenTelemetry, Prometheus / Grafana, Kubernetes
 
-**Status:** 🚧 Phase 4 (Serving layer) complete: events flow from the Event API through Kafka to the Processor and into Postgres, and users see balance changes live: a Query API streams every committed change over Server-Sent Events, with a demo page at http://localhost:8082. Processing is ordered per account, idempotent, retried on transient errors, and dead-lettered on permanent ones, verified by integration and crash tests. The targets below are goals; see [Measured Performance](#measured-performance) for current numbers.
+**Status:** 🚧 Phase 5 (Performance) complete: events flow from the Event API through Kafka to the Processor and into Postgres, and users see balance changes live: a Query API streams every committed change over Server-Sent Events, with a demo page at http://localhost:8082. Processing is ordered per account, idempotent, retried on transient errors, and dead-lettered on permanent ones, verified by integration and crash tests. See [Measured Performance](#measured-performance) for how it does against the targets below.
 
 ## Goals and Targets
 
@@ -25,17 +25,26 @@ A baseline is measured first (a naive synchronous implementation) so that any im
 
 ### Measured Performance
 
-Everything runs locally in Docker on a laptop: one Processor instance, a 6-partition topic, and `make loadgen` for 60 s per run across 1,000 accounts. End-to-end percentiles are estimated from histogram buckets, so they are approximate.
+Everything runs locally in Docker on a laptop: one Processor instance, a 6-partition topic, and 1,000 accounts. End-to-end percentiles are estimated from histogram buckets, so they are approximate. The full investigation is in **[docs/performance.md](docs/performance.md)**.
 
-**Phase 4: live push to users** (current)
+**Phase 5: batched writes and tuning** (current)
 
-Measured on battery power, which slows the laptop, so the tail latencies are higher than in the Phase 3 runs. Every comparison in this table was made under the same conditions.
+| Metric | Target | Result |
+| --- | --- | --- |
+| Sustained throughput | 5,000 events/s | ✅ Held for 10 minutes |
+| Saturation point | Identify | ~15,000–24,000 events/s, up from ~1,630 |
+| Lost events in the 10-minute full-pipeline run | None | ✅ 3,292,347 accepted, 3,292,347 applied |
+| End-to-end p50 | < 20 ms | ✅ 8.5 ms straight to Kafka; 40 ms with k6 and every service sharing the laptop |
+| End-to-end p99 | < 50 ms | ❌ 406 ms straight to Kafka; 3.4 s with k6 and every service sharing the laptop |
+| Event API p99 | < 30 ms | ❌ Over target under k6 at 5,000/s (p50 6.4 ms, p95 45 ms) |
+
+**Phase 4: live push to users**
+
+Measured on battery power, which slows the laptop, so the tail latencies are higher than in the Phase 3 runs. The `NOTIFY` comparisons here were capped by per-event round trips, which hid its real cost; see [docs/performance.md](docs/performance.md#other-things-tested).
 
 | Measurement | Result |
 | --- | --- |
 | Latency to push at 1,000 events/s (created → change reaches the Query API), p50 / p95 / p99 | 10 / 88 / 361 ms. The same as commit latency, so `NOTIFY` and SSE add almost nothing |
-| Cost of the `NOTIFY` trigger, at 1,000 events/s (p50 / p95 / p99) | 9.9 / 88 / 361 ms with it, 9.3 / 72 / 329 ms without (within run-to-run noise) |
-| Cost of the `NOTIFY` trigger, saturation point | ~1,720 events/s with it, ~1,700 without: no measurable cost at this scale |
 | `GET /accounts/{id}` at 2,000 reads/s, p50 / p99 | 0.4 / 1.2 ms on its own; 1.0 / 20 ms while 1,000 writes/s are processed |
 
 - **No Redis:** reads straight from Postgres already meet the p99 < 30 ms target, so a cache would only add invalidation problems. Worth revisiting if read traffic grows by orders of magnitude.
@@ -71,7 +80,7 @@ Measured on battery power, which slows the laptop, so the tail latencies are hig
                  │              Prometheus / Grafana (latency, throughput, consumer lag)
                  │
 Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer group)
-(HTTP/gRPC)   keyed by account_id             │  idempotent, ordered per partition
+(HTTP)        keyed by account_id             │  idempotent, ordered per partition, batched writes
                                               ├──▶ State store (Postgres) ──NOTIFY──▶ Query API ──SSE──▶ users (demo page)
                                               ├──▶ DLQ topic "transactions.dlq" (events that fail validation/processing)
                                               └──▶ Temporal (only for multi-step flows, e.g. settlement, refunds)
@@ -79,14 +88,14 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 
 ### Components
 
-- **Event API (Go):** Accepts financial events over HTTP/gRPC, validates them against the schema, stamps `created_at`, and produces them to Kafka with `account_id` as the message key.
+- **Event API (Go):** Accepts financial events over HTTP, validates them, stamps `created_at`, and produces them to Kafka with `account_id` as the message key.
 - **Kafka:** A durable, partitioned event log. Keying by `account_id` sends all events for an account to the same partition, so they are processed in order.
-- **Processor (Go):** A consumer group that applies business logic (balance updates, overdraft and currency checks). Each assigned partition gets its own worker goroutine, so events for one account are applied in order while partitions run in parallel. Offsets are committed only after an event is fully handled.
+- **Processor (Go):** A consumer group that applies business logic (balance updates, overdraft and currency checks). Each assigned partition gets its own worker goroutine, so events for one account are applied in order while partitions run in parallel. Under load, a worker applies everything queued for its partition in one database transaction. Offsets are committed only after an event is fully handled.
 - **State store:** PostgreSQL as the source of truth. A trigger publishes every committed account change with `NOTIFY`, and a `version` column increases with each change. Redis turned out to be unnecessary (see [Measured Performance](#measured-performance)).
 - **Query API (Go):** A separate read service that serves balances and paginated history, and streams balance changes to clients over Server-Sent Events. It listens to Postgres `NOTIFY` and fans each change out to the clients watching that account. Also serves a demo page.
 - **Dead-letter queue (DLQ):** Events that can never succeed (malformed, invalid, or rejected by a business rule) go to a separate topic with the reason in the headers, so they never block the partition. A CLI lists them and replays them once the cause is fixed.
 - **Temporal:** Orchestrates long-running, multi-step business processes started by specific events (e.g. settlement, refunds, chargebacks). It is deliberately kept **off** the per-event path to protect latency.
-- **OpenTelemetry:** A cross-cutting concern, not a pipeline stage. Every service emits traces and metrics to an OTel Collector. Trace context travels in Kafka message headers, so a single trace covers API → Kafka → processor → state store.
+- **OpenTelemetry:** A cross-cutting concern, not a pipeline stage. Every service emits traces and metrics to an OTel Collector. Trace context travels in Kafka message headers, so each event's trace covers API → Kafka → Processor. Database work is shared by a batch, so it appears in the first event's trace and links to the others.
 
 ### Key Design Decisions
 
@@ -100,9 +109,10 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 | Short session timeout + optional static membership | A crashed processor's partitions are reassigned in ~10 s, or immediately when it restarts with the same `KAFKA_GROUP_INSTANCE_ID` |
 | Separate read service (CQRS) | Reads and writes scale independently, and a burst of readers can't slow event processing |
 | Server-Sent Events instead of WebSocket | Updates only flow server → client, so plain HTTP with built-in browser reconnection is enough; no extra library or protocol |
-| Postgres `NOTIFY` from a trigger instead of an "account-updates" Kafka topic | `NOTIFY` is transactional: clients only hear about committed changes, and nothing can be published for a write that rolled back. Publishing to Kafka after the commit isn't atomic without an outbox. Measured cost: none at ~1,700 events/s |
+| Postgres `NOTIFY` from a trigger instead of an "account-updates" Kafka topic | `NOTIFY` is transactional: clients only hear about committed changes, and nothing can be published for a write that rolled back. Publishing to Kafka after the commit isn't atomic without an outbox. The tradeoff: a global lock at commit, which costs roughly 1.5–2× on p99 ([measured](docs/performance.md#other-things-tested)) and nothing at the median |
 | Version number on every account | Clients drop any update older than what they've shown, so reconnects and snapshot/update races never move a balance backwards |
-| Schema-defined events (Protobuf + schema registry) | Producers and consumers can evolve without breaking each other |
+| Batched writes with no timer | Round trips and commits become per batch, which raised saturation about 10×; a batch is only what's already waiting, so light load adds no delay |
+| Schema-defined events (Protobuf, linted with buf) | Producers and consumers share one definition of an event |
 | Temporal only for multi-step workflows | Workflow starts add tens of ms; per-event consistency comes from the three items above |
 | Instrument from day one | The latency targets can't be verified without end-to-end measurement |
 
@@ -111,7 +121,8 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 | Situation | What happens |
 | --- | --- |
 | Malformed or invalid event | Sent to the DLQ (`malformed` / `invalid`); processing continues |
-| Business rule fails | Sent to the DLQ (`insufficient_funds` for a debit that would overdraw, `currency_mismatch`); the balance is untouched |
+| Business rule fails | Sent to the DLQ (`insufficient_funds` for a debit that would overdraw, `currency_mismatch`, `balance_overflow`); the balance is untouched |
+| The database refuses a batch because of one event's contents | The batch is retried one event at a time, so only that event goes to the DLQ |
 | Duplicate delivery | Skipped: `event_id` is already in `processed_events` |
 | Postgres unavailable | Retried with exponential backoff (6 attempts, up to 5 s apart). If it still fails, the processor stops without committing that offset, and the event is retried after a restart |
 | Processor killed (`kill -9`) | Events whose offsets weren't committed are redelivered and deduplicated. Partitions move to another instance after the 10 s session timeout, or immediately on restart with static membership |

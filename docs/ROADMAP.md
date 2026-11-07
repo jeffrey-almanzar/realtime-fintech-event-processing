@@ -88,14 +88,16 @@ Build a thin end-to-end pipeline early, then make it correct, then make it fast.
 
 ## Phase 5: Performance
 
+**Status:** ✅ Complete (saturation ~15,000–24,000 events/s, up from ~1,630; the p99 target was missed and the reason is documented in `docs/performance.md`)
+
 **Goal:** Hit the targets, or understand exactly why you can't.
 
-- [ ] Load generator: rewrite `loadtest/k6.js` against the Event API, plus xk6-kafka or a Go tool that produces directly to Kafka
-- [ ] Ramp to 5,000 events/s, hold for 10 minutes, then step up to find the saturation point
-- [ ] Profile with `pprof` and find the bottleneck (usually DB writes)
-- [ ] Tune producer batching (`linger.ms`, `batch.size`, compression), partition count, DB connection pool, and batched DB writes per partition
-- [ ] Record before/after numbers for each change in `docs/performance.md`
-- [ ] Update the README targets table with measured results
+- [x] Load generator: rewrite `loadtest/k6.js` against the Event API, plus xk6-kafka or a Go tool that produces directly to Kafka
+- [x] Ramp to 5,000 events/s, hold for 10 minutes, then step up to find the saturation point
+- [x] Profile with `pprof` and find the bottleneck (usually DB writes)
+- [x] Tune producer batching (`linger.ms`, `batch.size`, compression), partition count, DB connection pool, and batched DB writes per partition
+- [x] Record before/after numbers for each change in `docs/performance.md`
+- [x] Update the README targets table with measured results
 
 **Done when:** There's a results table with real numbers, the saturation point, and what limits it.
 
