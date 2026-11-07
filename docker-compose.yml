@@ -138,5 +138,74 @@ services:
     depends_on:
       - prometheus
 
+  # The platform's own services. `make demo` starts these too; for development,
+  # `make up` leaves them out so they can run from source with `make run-*`.
+  api:
+    profiles: [app]
+    build: &app-build
+      context: .
+      args:
+        SERVICE: api
+    restart: on-failure
+    environment: &app-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DATABASE_URL: postgres://fintech:fintech@postgres:5432/fintech?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "8081:8081"
+    depends_on: &app-deps
+      kafka-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+
+  processor:
+    profiles: [app]
+    build:
+      <<: *app-build
+      args:
+        SERVICE: processor
+    restart: on-failure
+    environment: *app-env
+    depends_on: *app-deps
+
+  query:
+    profiles: [app]
+    build:
+      <<: *app-build
+      args:
+        SERVICE: query
+    restart: on-failure
+    environment: *app-env
+    ports:
+      - "8082:8082"
+    depends_on: *app-deps
+
+  worker:
+    profiles: [app]
+    build:
+      <<: *app-build
+      args:
+        SERVICE: worker
+    restart: on-failure # also covers Temporal still starting up
+    environment: *app-env
+    depends_on:
+      <<: *app-deps
+      temporal:
+        condition: service_started
+
+  # On demand: `make demo-load`.
+  loadgen:
+    profiles: [tools]
+    build:
+      <<: *app-build
+      args:
+        SERVICE: loadgen
+    environment: *app-env
+    command: ["-url", "http://api:8081/transactions", "-rate", "200", "-duration", "60s", "-debits"]
+    depends_on:
+      - api
+
 volumes:
   postgres-data:
