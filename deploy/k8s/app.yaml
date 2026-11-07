@@ -1,0 +1,203 @@
+# The platform's own services. Images are built and loaded into kind by
+# `make k8s-up`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: fintech
+spec:
+  selector:
+    app: api
+  ports:
+    - port: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: fintech
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: fintech/api:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: fintech-config }
+          ports:
+            - containerPort: 8081
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# Consumers in one group share the topic's partitions, so replicas add
+# throughput up to the partition count (6). A replica that exits or dies has
+# its partitions reassigned to the others.
+#
+# No probes: the Processor has no HTTP port, and it exits on any error it can't
+# recover from, which Kubernetes then restarts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: processor
+  namespace: fintech
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: processor
+  template:
+    metadata:
+      labels:
+        app: processor
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # Long enough to finish in-flight batches and commit offsets on SIGTERM.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: processor
+          image: fintech/processor:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: fintech-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fintech-db
+                  key: DATABASE_URL
+          resources:
+            requests: { cpu: 200m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: query
+  namespace: fintech
+spec:
+  selector:
+    app: query
+  ports:
+    - port: 8082
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: query
+  namespace: fintech
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: query
+  template:
+    metadata:
+      labels:
+        app: query
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: query
+          image: fintech/query:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: fintech-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fintech-db
+                  key: DATABASE_URL
+          ports:
+            - containerPort: 8082
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# Temporal workers and the outbox relay both handle running in several copies
+# (the relay uses FOR UPDATE SKIP LOCKED), so this can scale too.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: fintech
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: fintech/worker:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: fintech-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fintech-db
+                  key: DATABASE_URL
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

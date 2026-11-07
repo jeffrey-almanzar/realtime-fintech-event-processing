@@ -126,16 +126,18 @@ Build a thin end-to-end pipeline early, then make it correct, then make it fast.
 
 ## Phase 7: Deployment
 
+**Status:** ✅ Complete for this project's goal, a strong portfolio piece: everything runs from one command in Docker or on a local Kubernetes cluster, both verified in CI. Cloud deployment was left out on purpose because of its cost.
+
 **Goal:** Run it the way a production system runs.
 
-- [ ] Multi-stage Dockerfiles for each service (small images, non-root user)
-- [ ] Kubernetes manifests or a Helm chart: Deployments, Services, ConfigMaps, Secrets, health probes, resource limits
-- [ ] Test locally on `kind` or `minikube` first
-- [ ] Provision cloud infrastructure with Terraform: managed Kafka (MSK/Confluent), managed Postgres, a Kubernetes cluster
-- [ ] Autoscale processors on consumer lag (KEDA), with replicas ≤ partition count
-- [ ] Alerts on p99 latency, error rate, consumer lag, and DLQ growth
-- [ ] Complete the README's production readiness checklist; deploy from CI
+- [x] Multi-stage Dockerfile for each service (small images, non-root user)
+- [x] One-command demo: `make demo` from a fresh clone, smoke-tested in CI
+- [x] Kubernetes manifests: Deployments, a StatefulSet, Services, ConfigMaps, Secrets, health probes, resource limits
+- [x] Test on `kind`, in CI as well as locally
+- [x] Verify failure handling on the cluster: force-deleting Processor and worker pods under load loses no events
 
-**Done when:** A load test against the cloud deployment meets the targets, and alerts fire when a failure is injected.
+**Done when:** A fresh clone runs on a cluster, and it survives pods being killed under load.
 
-**You'll learn:** Kubernetes, Helm, Terraform, KEDA, operating a system in production.
+**Left out on purpose:** Terraform and managed cloud services, autoscaling with KEDA, alerting, API authentication, and high availability. They'd be the next steps for real production use.
+
+**You'll learn:** Docker, Kubernetes, kind, consumer group scaling, operating a system through failures.

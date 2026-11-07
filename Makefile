@@ -1,4 +1,4 @@
-.PHONY: up down logs build test test-integration lint proto migrate run-api run-processor run-query run-worker loadgen dlq dlq-replay demo demo-load demo-down smoke
+.PHONY: up down logs build test test-integration lint proto migrate run-api run-processor run-query run-worker loadgen dlq dlq-replay demo demo-load demo-down smoke k8s-up k8s-forward k8s-smoke k8s-down
 
 demo: ## Run everything in Docker and open the demo page. Needs only Docker
 	docker compose --profile app up -d --build
@@ -23,6 +23,18 @@ demo-down: ## Stop the demo and delete its data
 
 smoke: ## Check a running system end to end through its public APIs
 	./scripts/smoke.sh
+
+k8s-up: ## Run everything on a local kind cluster. Needs Docker, kind, kubectl
+	./scripts/k8s-up.sh
+
+k8s-forward: ## Expose the cluster's services on localhost until stopped
+	./scripts/k8s-forward.sh
+
+k8s-smoke: ## Run the smoke test against the cluster
+	./scripts/k8s-forward.sh ./scripts/smoke.sh
+
+k8s-down: ## Delete the kind cluster
+	kind delete cluster --name fintech
 
 up: ## Start the local stack, create topics, and run migrations
 	docker compose up -d --wait kafka postgres kafka-ui otel-collector jaeger prometheus grafana temporal

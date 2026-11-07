@@ -1,0 +1,269 @@
+# Backing services for a local kind cluster: one Kafka broker, one Postgres, a
+# Temporal dev server, and an OTel Collector. These are single-instance and
+# development-grade on purpose. A real deployment would use managed services
+# and point the app's configuration at them; see README.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fintech
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fintech-config
+  namespace: fintech
+data:
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  TEMPORAL_ADDRESS: temporal:7233
+  # Browsers reach these through port-forwards, so they stay on localhost.
+  EVENT_API_URL: http://localhost:8081
+  CORS_ALLOWED_ORIGINS: http://localhost:8082
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fintech-db
+  namespace: fintech
+type: Opaque
+stringData:
+  # A local development password. Real credentials would come from a secret
+  # manager and never be committed.
+  POSTGRES_PASSWORD: fintech
+  DATABASE_URL: postgres://fintech:fintech@postgres:5432/fintech?sslmode=disable
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: fintech
+spec:
+  selector:
+    app: postgres
+  clusterIP: None
+  ports:
+    - port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: fintech
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          args: ["-c", "shared_buffers=256MB", "-c", "max_wal_size=2GB"]
+          env:
+            - name: POSTGRES_USER
+              value: fintech
+            - name: POSTGRES_DB
+              value: fintech
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fintech-db
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "fintech", "-d", "fintech"]
+            periodSeconds: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: fintech
+spec:
+  selector:
+    app: kafka
+  ports:
+    - port: 29092
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: fintech
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      # A Service named "kafka" would otherwise inject KAFKA_PORT and similar
+      # variables, which this image reads as broker settings.
+      enableServiceLinks: false
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.0
+          env:
+            - { name: KAFKA_NODE_ID, value: "1" }
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@localhost:9093" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
+            - { name: KAFKA_LISTENERS, value: "INTERNAL://:29092,CONTROLLER://:9093" }
+            - { name: KAFKA_ADVERTISED_LISTENERS, value: "INTERNAL://kafka:29092" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "INTERNAL" }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+            - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
+            - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
+          ports:
+            - containerPort: 29092
+          readinessProbe:
+            tcpSocket:
+              port: 29092
+            periodSeconds: 3
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+  namespace: fintech
+spec:
+  selector:
+    app: temporal
+  ports:
+    - { name: grpc, port: 7233 }
+    - { name: ui, port: 8233 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: fintech
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal
+  template:
+    metadata:
+      labels:
+        app: temporal
+    spec:
+      containers:
+        - name: temporal
+          image: temporalio/temporal:1.8.3
+          args: ["server", "start-dev", "--ip", "0.0.0.0"]
+          ports:
+            - containerPort: 7233
+            - containerPort: 8233
+          readinessProbe:
+            tcpSocket:
+              port: 7233
+            periodSeconds: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector
+  namespace: fintech
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      batch: {}
+    exporters:
+      # Grafana and Jaeger stay in the Compose setup; here telemetry only has
+      # somewhere to go. Point this at a real backend to use it.
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: fintech
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - port: 4317
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: fintech
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.160.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - containerPort: 4317
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector

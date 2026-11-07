@@ -2,7 +2,7 @@
 # Checks the running system from the outside, through its public APIs only:
 # a deposit reaches the balance, a withdrawal settles, and a declined one is
 # refunded by the workflow. Used by `make smoke` and by CI after `make demo`.
-set -euo pipefail
+set -uo pipefail
 
 EVENT_API=${EVENT_API:-http://localhost:8081}
 QUERY_API=${QUERY_API:-http://localhost:8082}
@@ -15,7 +15,7 @@ field() { # field <json> <key>: reads one top-level number from a flat JSON obje
 
 send() { # send <type> <amount>: posts a transaction and fails on anything but 202
   local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$EVENT_API/transactions" \
+  code=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$EVENT_API/transactions" \
     -H 'Content-Type: application/json' \
     -d "{\"account_id\":\"$ACCOUNT\",\"type\":\"$1\",\"amount_minor\":$2,\"currency\":\"USD\"}")
   [ "$code" = 202 ] || { echo "FAIL: $1 $2 returned HTTP $code"; exit 1; }
@@ -24,7 +24,7 @@ send() { # send <type> <amount>: posts a transaction and fails on anything but 2
 wait_for_balance() { # wait_for_balance <expected> <description>
   local body balance="" deadline=$((SECONDS + TIMEOUT))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    body=$(curl -s "$QUERY_API/accounts/$ACCOUNT" || true)
+    body=$(curl -s --max-time 10 "$QUERY_API/accounts/$ACCOUNT" || true)
     balance=$(field "$body" balance_minor)
     if [ "$balance" = "$1" ]; then
       echo "PASS: $2 (balance $1)"
@@ -39,14 +39,14 @@ wait_for_balance() { # wait_for_balance <expected> <description>
 wait_for_settlement() { # wait_for_settlement <status> <description>
   local deadline=$((SECONDS + TIMEOUT))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if curl -s "$QUERY_API/accounts/$ACCOUNT/transactions?limit=20" | grep -q "\"settlement\":\"$1\""; then
+    if curl -s --max-time 10 "$QUERY_API/accounts/$ACCOUNT/transactions?limit=20" | grep -q "\"settlement\":\"$1\""; then
       echo "PASS: $2 (settlement $1)"
       return 0
     fi
     sleep 1
   done
   echo "FAIL: $2: no settlement reached '$1'"
-  curl -s "$QUERY_API/accounts/$ACCOUNT/transactions?limit=20" || true
+  curl -s --max-time 10 "$QUERY_API/accounts/$ACCOUNT/transactions?limit=20" || true
   exit 1
 }
 

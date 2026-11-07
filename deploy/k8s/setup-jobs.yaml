@@ -1,0 +1,48 @@
+# One-time setup: create the Kafka topics and apply database migrations. Both
+# are safe to run again. Retries cover the backing services still starting up.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init
+  namespace: fintech
+spec:
+  backoffLimit: 20
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      enableServiceLinks: false
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-init
+          image: apache/kafka:3.9.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              for topic in transactions transactions.dlq; do
+                /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 \
+                  --create --if-not-exists --topic "$topic" --partitions 6 --replication-factor 1
+              done
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: fintech
+spec:
+  backoffLimit: 20
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: fintech/migrate:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-path=/migrations", "-database=$(DATABASE_URL)", "up"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fintech-db
+                  key: DATABASE_URL

@@ -63,6 +63,30 @@ jobs:
         if: failure()
         run: docker compose --profile app logs --tail=60 api processor query worker temporal migrate kafka-init
 
+  # Deploys the manifests to a real cluster and runs the same smoke test.
+  kubernetes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: fintech
+
+      - name: Deploy
+        run: make k8s-up
+
+      - name: Smoke test
+        run: make k8s-smoke
+
+      - name: State on failure
+        if: failure()
+        run: |
+          kubectl -n fintech get pods
+          kubectl -n fintech get events --sort-by=.lastTimestamp | tail -20
+          kubectl -n fintech logs deployment/processor --tail=40 || true
+          kubectl -n fintech logs deployment/worker --tail=40 || true
+
   proto:
     runs-on: ubuntu-latest
     steps:
