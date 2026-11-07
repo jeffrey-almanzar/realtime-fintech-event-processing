@@ -38,6 +38,22 @@ func HTTPAddr() string {
 	return getEnv("HTTP_ADDR", ":8081")
 }
 
+// QueryHTTPAddr returns the address the Query API listens on.
+func QueryHTTPAddr() string {
+	return getEnv("QUERY_HTTP_ADDR", ":8082")
+}
+
+// EventAPIURL is where browser clients (the demo page) send transactions.
+func EventAPIURL() string {
+	return getEnv("EVENT_API_URL", "http://localhost:8081")
+}
+
+// CORSAllowedOrigins lists the browser origins allowed to call the Event API,
+// comma-separated.
+func CORSAllowedOrigins() string {
+	return getEnv("CORS_ALLOWED_ORIGINS", "http://localhost:8082")
+}
+
 func getEnv(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v

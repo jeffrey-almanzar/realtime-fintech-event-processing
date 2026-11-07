@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Balance</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #5d6470; --border: #e2e5ea;
+    --accent: #2f6fed; --good: #12805c; --bad: #c4362c; --flash: #e6f4ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101216; --card: #181b21; --text: #e9ebef; --muted: #9aa1ad; --border: #2a2f38;
+      --accent: #6d9bff; --good: #4cc79a; --bad: #ff7a70; --flash: #16352a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
+  h1 { font-size: 20px; margin: 0; }
+  .pill { font-size: 13px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .pill::before { content: "●"; margin-right: 6px; }
+  .pill.live { color: var(--good); } .pill.down { color: var(--bad); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 6px; }
+  input, select, button { font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  input { min-width: 0; flex: 1; }
+  button { cursor: pointer; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+  .balance { font-size: 44px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; transition: background-color 0.8s; border-radius: 8px; margin: 4px -8px; padding: 0 8px; }
+  .balance.flash { background: var(--flash); transition: none; }
+  .meta { color: var(--muted); font-size: 13px; }
+  #feedback { min-height: 22px; margin-top: 12px; font-size: 14px; }
+  #feedback.good { color: var(--good); } #feedback.bad { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  td.amount { text-align: right; } th.amount { text-align: right; }
+  td.credit { color: var(--good); } td.debit { color: var(--bad); }
+  tr.new td { animation: fade 1.5s ease-out; }
+  @keyframes fade { from { background: var(--flash); } to { background: transparent; } }
+  .empty { color: var(--muted); padding: 12px 4px; }
+  code { font-size: 13px; }
+  @media (max-width: 480px) { .balance { font-size: 34px; } .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Live balance</h1>
+    <span id="status" class="pill">Connecting</span>
+  </header>
+
+  <section class="card">
+    <label for="account">Account</label>
+    <form id="watch" class="row">
+      <input id="account" value="acct-demo" autocomplete="off" spellcheck="false">
+      <button class="secondary" type="submit">Watch</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="meta" id="account-label">acct-demo</div>
+    <div class="balance" id="balance">—</div>
+    <div class="meta" id="version">Waiting for data…</div>
+
+    <form id="send" class="row" style="margin-top: 16px">
+      <input id="amount" type="number" min="0.01" step="0.01" value="25.00" aria-label="Amount">
+      <select id="currency" aria-label="Currency">
+        <option>USD</option><option>EUR</option><option>GBP</option><option>CAD</option><option>MXN</option><option>BRL</option><option>JPY</option>
+      </select>
+      <button type="submit" data-type="deposit">Deposit</button>
+      <button type="submit" data-type="withdrawal" class="secondary">Withdraw</button>
+    </form>
+    <div id="feedback"></div>
+  </section>
+
+  <section class="card">
+    <table>
+      <thead><tr><th>When</th><th>Type</th><th class="hide-sm">Event</th><th class="amount">Amount</th></tr></thead>
+      <tbody id="history"><tr><td colspan="4" class="empty">No transactions yet.</td></tr></tbody>
+    </table>
+  </section>
+
+  <p class="meta">
+    Clicking a button sends a transaction to the Event API → Kafka → Processor → Postgres. The new balance comes back
+    over Server-Sent Events from Postgres <code>NOTIFY</code>. Rejected events (e.g. overdrafts) never change the
+    balance; see them with <code>make dlq</code>.
+  </p>
+</main>
+
+<script>
+const EVENT_API = {{.EventAPIURL}};
+const $ = (id) => document.getElementById(id);
+
+let account = $("account").value;
+let source = null;
+let current = null;           // last balance shown
+const pending = new Map();    // event_id -> { start, timer }
+
+function digits(currency) {
+  try { return new Intl.NumberFormat(undefined, { style: "currency", currency }).resolvedOptions().maximumFractionDigits; }
+  catch { return 2; }
+}
+function money(minor, currency) {
+  const d = digits(currency);
+  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(minor / 10 ** d);
+}
+function setStatus(text, cls) { $("status").textContent = text; $("status").className = "pill " + (cls || ""); }
+function setFeedback(text, cls) { $("feedback").textContent = text; $("feedback").className = cls || ""; }
+
+function watch(id) {
+  account = id.trim();
+  if (!account) return;
+  if (source) source.close();
+  current = null;
+  $("account-label").textContent = account;
+  $("balance").textContent = "—";
+  $("version").textContent = "Waiting for data…";
+  loadHistory();
+
+  setStatus("Connecting");
+  source = new EventSource(`/accounts/${encodeURIComponent(account)}/events`);
+  source.onopen = () => setStatus("Live", "live");
+  source.onerror = () => setStatus("Reconnecting", "down");
+  source.addEventListener("not_found", () => {
+    $("version").textContent = "No transactions yet. Make a deposit to open the account.";
+  });
+  source.addEventListener("balance", (e) => showBalance(JSON.parse(e.data)));
+}
+
+function showBalance(a) {
+  if (current && a.version <= current.version) return;
+  const changed = current !== null;
+  current = a;
+  $("balance").textContent = money(a.balance_minor, a.currency);
+  $("version").textContent = `Version ${a.version} · updated ${new Date(a.updated_at).toLocaleTimeString()}`;
+  $("currency").value = a.currency;
+  if (changed) {
+    $("balance").classList.add("flash");
+    requestAnimationFrame(() => requestAnimationFrame(() => $("balance").classList.remove("flash")));
+    loadHistory(a.last_event_id);
+  }
+  const p = a.last_event_id && pending.get(a.last_event_id);
+  if (p) {
+    clearTimeout(p.timer);
+    pending.delete(a.last_event_id);
+    setFeedback(`Applied and pushed ${Math.round(performance.now() - p.start)} ms after you clicked.`, "good");
+  }
+}
+
+async function loadHistory(highlight) {
+  const res = await fetch(`/accounts/${encodeURIComponent(account)}/transactions?limit=10`);
+  if (!res.ok) return;
+  const { transactions } = await res.json();
+  const body = $("history");
+  body.replaceChildren();
+  if (transactions.length === 0) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">No transactions yet.</td></tr>';
+    return;
+  }
+  for (const t of transactions) {
+    const tr = document.createElement("tr");
+    if (t.event_id === highlight) tr.className = "new";
+    const cells = [
+      new Date(t.created_at).toLocaleTimeString(),
+      t.type.replace("_", " "),
+      t.event_id.slice(0, 8),
+      (t.amount_minor > 0 ? "+" : "") + money(t.amount_minor, t.currency),
+    ];
+    cells.forEach((text, i) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      if (i === 2) td.className = "hide-sm meta";
+      if (i === 3) td.className = "amount " + (t.amount_minor > 0 ? "credit" : "debit");
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  }
+}
+
+$("watch").addEventListener("submit", (e) => { e.preventDefault(); watch($("account").value); });
+
+$("send").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const type = e.submitter.dataset.type;
+  const currency = $("currency").value;
+  const amount = Math.round(parseFloat($("amount").value) * 10 ** digits(currency));
+  if (!(amount > 0)) { setFeedback("Enter a positive amount.", "bad"); return; }
+
+  const event_id = crypto.randomUUID();
+  const start = performance.now();
+  // Registered before sending so a very fast update isn't missed.
+  const timer = setTimeout(() => {
+    pending.delete(event_id);
+    setFeedback(`Not applied after 5 s. It was probably rejected (overdraft or currency mismatch); run "make dlq" to see why.`, "bad");
+  }, 5000);
+  pending.set(event_id, { start, timer });
+  setFeedback("Sending…");
+
+  try {
+    const res = await fetch(`${EVENT_API}/transactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event_id, account_id: account, type, amount_minor: amount, currency }),
+    });
+    if (!res.ok) {
+      clearTimeout(timer); pending.delete(event_id);
+      const body = await res.json().catch(() => ({}));
+      setFeedback(`Rejected by the Event API: ${body.error || res.status}`, "bad");
+    } else if (pending.has(event_id)) {
+      setFeedback(`Accepted by Kafka after ${Math.round(performance.now() - start)} ms, waiting for the Processor…`);
+    }
+  } catch (err) {
+    clearTimeout(timer); pending.delete(event_id);
+    setFeedback(`Couldn't reach the Event API at ${EVENT_API}. Is "make run-api" running?`, "bad");
+  }
+});
+
+watch(account);
+</script>
+</body>
+</html>

@@ -57,7 +57,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              config.HTTPAddr(),
-		Handler:           otelhttp.NewHandler(mux, "http.server", otelhttp.WithSpanNameFormatter(spanName)),
+		Handler:           otelhttp.NewHandler(withCORS(mux, config.CORSAllowedOrigins()), "http.server", otelhttp.WithSpanNameFormatter(spanName)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

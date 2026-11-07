@@ -61,11 +61,16 @@ ON CONFLICT (event_id) DO NOTHING`
 const lockAccount = `
 SELECT balance_minor, currency FROM accounts WHERE account_id = $1 FOR UPDATE`
 
+// last_event_* let readers tie a balance change to the event that caused it
+// (and measure latency up to the push to clients).
 const updateBalance = `
-UPDATE accounts SET balance_minor = $2, updated_at = now() WHERE account_id = $1`
+UPDATE accounts
+SET balance_minor = $2, updated_at = now(), last_event_id = $3, last_event_at = $4
+WHERE account_id = $1`
 
 const createAccount = `
-INSERT INTO accounts (account_id, currency, balance_minor) VALUES ($1, $2, $3)
+INSERT INTO accounts (account_id, currency, balance_minor, last_event_id, last_event_at)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (account_id) DO NOTHING`
 
 // Apply records the event and updates the balance in one database
@@ -111,10 +116,11 @@ func (s *Store) Apply(ctx context.Context, tx *fintechv1.Transaction, delta int6
 			Detail: fmt.Sprintf("account %s has %d, event needs %d", tx.AccountId, balance, -delta)}
 	}
 
+	createdAt := tx.CreatedAt.AsTime()
 	if exists {
-		_, err = dbtx.Exec(ctx, updateBalance, tx.AccountId, newBalance)
+		_, err = dbtx.Exec(ctx, updateBalance, tx.AccountId, newBalance, tx.EventId, createdAt)
 	} else {
-		tag, err = dbtx.Exec(ctx, createAccount, tx.AccountId, tx.Currency, newBalance)
+		tag, err = dbtx.Exec(ctx, createAccount, tx.AccountId, tx.Currency, newBalance, tx.EventId, createdAt)
 		if err == nil && tag.RowsAffected() == 0 {
 			// Another processor created the account between our SELECT and
 			// INSERT; retrying will take the row lock path.

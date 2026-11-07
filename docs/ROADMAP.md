@@ -70,13 +70,15 @@ Build a thin end-to-end pipeline early, then make it correct, then make it fast.
 
 ## Phase 4: Serving Layer
 
+**Status:** ✅ Complete (push latency p50 ~10 ms at 1,000 events/s; NOTIFY has no measurable throughput cost)
+
 **Goal:** Users see updates as they happen.
 
-- [ ] **Query API:** `GET /accounts/{id}` and `GET /accounts/{id}/transactions`
-- [ ] **Real-time push:** a WebSocket (or Server-Sent Events) endpoint that pushes balance changes to subscribed clients, via Postgres `LISTEN/NOTIFY` or an `account-updates` topic
-- [ ] Optional Redis cache for hot accounts, only if read latency calls for it
-- [ ] A small demo page that shows a balance updating live
-- [ ] Extend the latency metric so it measures up to the WebSocket push
+- [x] **Query API:** `GET /accounts/{id}` and `GET /accounts/{id}/transactions`
+- [x] **Real-time push:** a WebSocket (or Server-Sent Events) endpoint that pushes balance changes to subscribed clients, via Postgres `LISTEN/NOTIFY` or an `account-updates` topic
+- [x] Optional Redis cache for hot accounts, only if read latency calls for it (measured: not needed; reads p99 1.2 ms idle, 20 ms under write load)
+- [x] A small demo page that shows a balance updating live
+- [x] Extend the latency metric so it measures up to the push (SSE was chosen over WebSocket)
 
 **Done when:** You send an event and watch the demo page update within the latency target.
 

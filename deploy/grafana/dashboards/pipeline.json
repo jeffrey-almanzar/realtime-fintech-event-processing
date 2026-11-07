@@ -1,78 +1,248 @@
 {
   "uid": "fintech-pipeline",
   "title": "Transaction Pipeline",
-  "tags": ["fintech"],
+  "tags": [
+    "fintech"
+  ],
   "timezone": "browser",
   "refresh": "5s",
-  "time": { "from": "now-15m", "to": "now" },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
   "schemaVersion": 39,
   "panels": [
     {
       "type": "timeseries",
       "title": "End-to-end latency (created_at → committed)",
       "description": "Measured by the processor after the balance update commits.",
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 9 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
       "targets": [
-        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(transaction_e2e_latency_milliseconds_bucket[30s])))" },
-        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(transaction_e2e_latency_milliseconds_bucket[30s])))" },
-        { "refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(transaction_e2e_latency_milliseconds_bucket[30s])))" }
+        {
+          "refId": "A",
+          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(transaction_e2e_latency_milliseconds_bucket[30s])))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(transaction_e2e_latency_milliseconds_bucket[30s])))"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(transaction_e2e_latency_milliseconds_bucket[30s])))"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Processor throughput by result",
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 9 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
       "targets": [
-        { "refId": "A", "legendFormat": "{{result}}", "expr": "sum by (result) (rate(transactions_processed_total[30s]))" }
+        {
+          "refId": "A",
+          "legendFormat": "{{result}}",
+          "expr": "sum by (result) (rate(transactions_processed_total[30s]))"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Consumer lag",
       "description": "Messages not yet processed, per consumer group.",
-      "gridPos": { "x": 0, "y": 9, "w": 12, "h": 9 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
       "targets": [
-        { "refId": "A", "legendFormat": "{{group}}", "expr": "sum by (group) (kafka_consumer_lag)" }
+        {
+          "refId": "A",
+          "legendFormat": "{{group}}",
+          "expr": "sum by (group) (kafka_consumer_lag)"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Event API: request rate and p99 latency",
-      "gridPos": { "x": 12, "y": 9, "w": 12, "h": 9 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
-        "defaults": { "unit": "reqps" },
+        "defaults": {
+          "unit": "reqps"
+        },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "p99 latency" },
+            "matcher": {
+              "id": "byName",
+              "options": "p99 latency"
+            },
             "properties": [
-              { "id": "unit", "value": "ms" },
-              { "id": "custom.axisPlacement", "value": "right" }
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
             ]
           }
         ]
       },
       "targets": [
-        { "refId": "A", "legendFormat": "{{http_response_status_code}}", "expr": "sum by (http_response_status_code) (rate(http_server_request_duration_seconds_count[30s]))" },
-        { "refId": "B", "legendFormat": "p99 latency", "expr": "1000 * histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket[30s])))" }
+        {
+          "refId": "A",
+          "legendFormat": "{{http_response_status_code}}",
+          "expr": "sum by (http_response_status_code) (rate(http_server_request_duration_seconds_count[30s]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "p99 latency",
+          "expr": "1000 * histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket[30s])))"
+        }
       ]
     },
     {
       "type": "timeseries",
       "title": "Dead-lettered events and retries",
       "description": "Dead-lettered: events that can never succeed, by reason. Retries: transient errors (e.g. Postgres unavailable).",
-      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
       "targets": [
-        { "refId": "A", "legendFormat": "DLQ: {{reason}}", "expr": "sum by (reason) (rate(transactions_processed_total{result=\"dead_lettered\"}[30s]))" },
-        { "refId": "B", "legendFormat": "retry: {{operation}}", "expr": "sum by (operation) (rate(transactions_retries_total[30s]))" }
+        {
+          "refId": "A",
+          "legendFormat": "DLQ: {{reason}}",
+          "expr": "sum by (reason) (rate(transactions_processed_total{result=\"dead_lettered\"}[30s]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "retry: {{operation}}",
+          "expr": "sum by (operation) (rate(transactions_retries_total[30s]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency to push (created_at → change reaches the Query API)",
+      "description": "Measured by the Query API when Postgres NOTIFY delivers the change. This is the latency a user watching the account sees.",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 16,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(transaction_push_latency_milliseconds_bucket[30s])))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(transaction_push_latency_milliseconds_bucket[30s])))"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(transaction_push_latency_milliseconds_bucket[30s])))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Open live streams",
+      "gridPos": {
+        "x": 16,
+        "y": 26,
+        "w": 8,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(stream_subscribers)"
+        }
       ]
     }
   ]
