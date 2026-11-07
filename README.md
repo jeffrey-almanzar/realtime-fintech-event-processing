@@ -1,357 +1,292 @@
 # Realtime FinTech Event Processing Platform
 
-**Problem:** Fintech platforms often show users stale financial data (balances, transaction status) because events are processed in slow batches or through tightly coupled services. Slow updates hurt user experience and trust.
+[![CI](https://github.com/jeffrey-almanzar/realtime-fintech-event-processing/actions/workflows/ci.yml/badge.svg)](https://github.com/jeffrey-almanzar/realtime-fintech-event-processing/actions/workflows/ci.yml)
 
-**Solution:** A real-time event processing platform built with Go and Kafka. Financial events are ingested through an API, streamed through Kafka partitioned by account, processed idempotently, and written to a state store that users can query or subscribe to, so updates show up in milliseconds instead of seconds.
+An event-driven payments backend in Go: transactions flow through Kafka into Postgres, balances update live in the browser, and withdrawals settle through durable Temporal workflows that refund the customer when a payment fails. It keeps its balances correct when processes are killed under load, and there are tests to prove it.
 
-**Technologies:** Go, Kafka, PostgreSQL, Temporal, OpenTelemetry, Prometheus / Grafana, Kubernetes
+![Demo: a deposit, a withdrawal that settles, and a declined withdrawal that is refunded automatically](docs/images/demo.gif)
 
-**Status:** 🚧 Phase 6 (Workflows) complete: events flow from the Event API through Kafka to the Processor and into Postgres, and users see balance changes live: a Query API streams every committed change over Server-Sent Events, with a demo page at http://localhost:8082. Processing is ordered per account, idempotent, retried on transient errors, and dead-lettered on permanent ones. Withdrawals settle through a Temporal workflow that refunds the account if the payment provider fails. All of this is verified by integration and crash tests. See [Measured Performance](#measured-performance) for how it does against the targets below.
+*A deposit, a withdrawal that settles, and a withdrawal the payment provider declines, which the workflow refunds automatically. Every balance change is pushed to the browser as it commits.*
 
-## Goals and Targets
+**Problem:** Financial apps often show stale balances because events are processed in slow batches or through tightly coupled services. Keeping them fast is easy; keeping them fast *and correct* through crashes, retries, and duplicate deliveries is the hard part.
 
-The main metric is **end-to-end latency**: the time from when an event is created (timestamp set by the producer) to when its result is visible in the state store.
+**Solution:** Events are streamed through Kafka partitioned by account, applied idempotently in batched database transactions, and pushed to clients the moment they commit. Multi-step processes that involve outside systems run as Temporal workflows, kept off the main event path.
 
-| Metric | Target | How to Measure |
-| --- | --- | --- |
-| Sustained throughput | 5,000 events/s (~430M events/day) | Load generator produce rate vs. processor commit rate |
-| End-to-end latency | p50 < 20 ms, p99 < 50 ms | Histogram of `processed_at - created_at`, exported via OpenTelemetry |
-| Ingestion API latency | p99 < 30 ms | k6 / OpenTelemetry HTTP server spans |
-| Error rate | < 0.1% | Failed requests + events routed to the DLQ / total events |
-| Consumer lag | < 1,000 messages at steady state | Kafka consumer group lag exported to Prometheus |
-| Saturation point | Identify and document | Increase load step by step until p99 latency or lag stops being stable |
+**Technologies:** Go, Kafka, PostgreSQL, Temporal, OpenTelemetry, Prometheus, Grafana, Jaeger, Docker, Kubernetes, Protobuf, k6
 
-A baseline is measured first (a naive synchronous implementation) so that any improvement claimed is backed by numbers.
+## Try It
 
-### Measured Performance
+All you need is Docker. Every service is built and started for you, which takes a few minutes the first time:
 
-Everything runs locally in Docker on a laptop: one Processor instance, a 6-partition topic, and 1,000 accounts. End-to-end percentiles are estimated from histogram buckets, so they are approximate. The full investigation is in **[docs/performance.md](docs/performance.md)**.
+```bash
+git clone https://github.com/jeffrey-almanzar/realtime-fintech-event-processing.git
+cd realtime-fintech-event-processing
+make demo
+```
 
-**Phase 5: batched writes and tuning** (current)
+| Open | To see |
+| --- | --- |
+| [localhost:8082](http://localhost:8082) | **The demo page.** Deposit, then withdraw an amount ending in `.13` to watch a decline and automatic refund |
+| [localhost:3000](http://localhost:3000) | **Grafana:** Fintech → Transaction Pipeline. Run `make demo-load` to fill the charts |
+| [localhost:16686](http://localhost:16686) | **Jaeger:** a single event's path across services |
+| [localhost:8233](http://localhost:8233) | **Temporal:** every settlement workflow and its history |
+| [localhost:8080](http://localhost:8080) | **Kafka UI:** topics, messages, and consumer groups |
+
+`make smoke` tests the running system end to end, and `make demo-down` stops it and deletes its data.
+
+## Results
+
+Measured on one laptop, with the broker, database, services, and load generator all sharing it. The full investigation is in **[docs/performance.md](docs/performance.md)**.
 
 | Metric | Target | Result |
 | --- | --- | --- |
 | Sustained throughput | 5,000 events/s | ✅ Held for 10 minutes |
-| Saturation point | Identify | ~15,000–24,000 events/s, up from ~1,630 |
-| Lost events in the 10-minute full-pipeline run | None | ✅ 3,292,347 accepted, 3,292,347 applied |
-| End-to-end p50 | < 20 ms | ✅ 8.5 ms straight to Kafka; 40 ms with k6 and every service sharing the laptop |
-| End-to-end p99 | < 50 ms | ❌ 406 ms straight to Kafka; 3.4 s with k6 and every service sharing the laptop |
-| Event API p99 | < 30 ms | ❌ Over target under k6 at 5,000/s (p50 6.4 ms, p95 45 ms) |
+| Saturation point | Identify it | ~15,000–24,000 events/s, **about 10× the ~1,630 before optimizing** |
+| Events lost in the 10-minute full-pipeline run | None | ✅ 3,292,347 accepted, 3,292,347 applied |
+| Events lost when killing processes under load | None | ✅ None, with `kill -9` and with force-deleted Kubernetes pods |
+| End-to-end p50 | < 20 ms | ✅ 8.5 ms straight to Kafka; 40 ms with k6 and every service on the laptop |
+| End-to-end p99 | < 50 ms | ❌ **Missed:** 406 ms straight to Kafka; 3.4 s with k6 and every service on the laptop |
+| Event API p99 | < 30 ms | ❌ **Missed** under k6 at 5,000/s (p50 6.4 ms, p95 45 ms) |
 
-**Phase 4: live push to users**
-
-Measured on battery power, which slows the laptop, so the tail latencies are higher than in the Phase 3 runs. The `NOTIFY` comparisons here were capped by per-event round trips, which hid its real cost; see [docs/performance.md](docs/performance.md#other-things-tested).
-
-| Measurement | Result |
-| --- | --- |
-| Latency to push at 1,000 events/s (created → change reaches the Query API), p50 / p95 / p99 | 10 / 88 / 361 ms. The same as commit latency, so `NOTIFY` and SSE add almost nothing |
-| `GET /accounts/{id}` at 2,000 reads/s, p50 / p99 | 0.4 / 1.2 ms on its own; 1.0 / 20 ms while 1,000 writes/s are processed |
-
-- **No Redis:** reads straight from Postgres already meet the p99 < 30 ms target, so a cache would only add invalidation problems. Worth revisiting if read traffic grows by orders of magnitude.
-
-**Phase 3: one worker per partition**
-
-| Load | Event API p50 / p99 | End-to-end p50 / p95 / p99 |
-| --- | --- | --- |
-| 1,000 events/s | 5.7 / 14 ms | 8 / 36 / 163 ms |
-| 2,000 events/s | 5.7 / 27 ms | > 8 s (saturated) |
-| 3,000 events/s | 5.6 / 34 ms | > 30 s (saturated) |
-
-- **Saturation point:** about **1,700–2,000 events/s**, roughly **3× the baseline**. The six partitions are now processed in parallel.
-- **Bottleneck:** still one Postgres transaction (four statements) per event. Phase 5 targets this with batched writes.
-
-**Phase 2 baseline: one message at a time**
-
-| Load | Event API p50 / p99 | End-to-end p50 / p95 / p99 | Max consumer lag |
-| --- | --- | --- | --- |
-| 100 events/s | 7.3 / 26 ms | 8 / 20 / 73 ms | 0 |
-| 300 events/s | 6.4 / 14 ms | 8 / 19 / 83 ms | 5 |
-| 1,000 events/s | 5.8 / 22 ms | > 5 s (saturated) | ~23,000 |
-
-- **Saturation point:** about **650 events/s**. Beyond that, lag grows and latency is dominated by time spent waiting in Kafka.
-- **Bottleneck:** sequential database round trips (BEGIN, two INSERTs, COMMIT) for every event. The Event API is not the limit.
+The p99 misses are documented rather than tuned away: most of the seconds-long tail came from sharing the laptop, and what remains points at slow commits during Postgres checkpoints.
 
 ## Architecture
 
 ```
-                 ┌──────────────── OTel Collector ◀── traces / metrics from every service
-                 │                       │
-                 │                       ▼
-                 │              Prometheus / Grafana (latency, throughput, consumer lag)
-                 │
-Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer group)
-(HTTP)        keyed by account_id             │  idempotent, ordered per partition, batched writes
-                                              ├──▶ State store (Postgres) ──NOTIFY──▶ Query API ──SSE──▶ users (demo page)
-                                              ├──▶ DLQ topic "transactions.dlq" (events that fail validation/processing)
-                                              └──▶ Outbox table ──▶ Settlement worker ──▶ Temporal ──▶ mock payment provider
-                                                                     │  (declined: refund event back into Kafka)
+                         ┌── OTel Collector ◀── traces and metrics from every service
+                         │        └──▶ Prometheus / Grafana, Jaeger
+                         │
+Event API ──▶ Kafka "transactions" ──▶ Processor (consumer group, one worker per partition)
+ (HTTP)       keyed by account_id        │  ordered per account, idempotent, batched writes
+    ▲                                    │
+    │                                    ├──▶ Postgres ──NOTIFY──▶ Query API ──SSE──▶ browser
+    │                                    │
+    │                                    ├──▶ Kafka "transactions.dlq" (events that can never succeed)
+    │                                    │
+    │                                    └──▶ settlements outbox table (same transaction as the debit)
+    │                                              │
+    │                                              ▼
+    │                                    Settlement worker ──▶ Temporal ──▶ mock payment provider
+    │                                              │
+    └── refund events go back into Kafka ◀─────────┘  (when a charge fails for good)
 ```
 
-### Components
+| Component | What it does |
+| --- | --- |
+| **Event API** | Validates transactions and publishes them to Kafka keyed by account, responding once the broker has stored them |
+| **Processor** | Applies events to balances, with overdraft and currency checks. One worker per partition keeps each account's events in order, and everything queued is applied in one transaction |
+| **Query API** | Separate read service: balances, paginated history, and a Server-Sent Events stream of changes, fed by Postgres `NOTIFY`. Serves the demo page |
+| **Settlement worker** | Starts workflows from the outbox and runs them: charge the provider, and refund if that fails for good |
+| **DLQ tool** | `make dlq` lists rejected events with their reasons, and `make dlq-replay` republishes them once the cause is fixed |
 
-- **Event API (Go):** Accepts financial events over HTTP, validates them, stamps `created_at`, and produces them to Kafka with `account_id` as the message key.
-- **Kafka:** A durable, partitioned event log. Keying by `account_id` sends all events for an account to the same partition, so they are processed in order.
-- **Processor (Go):** A consumer group that applies business logic (balance updates, overdraft and currency checks). Each assigned partition gets its own worker goroutine, so events for one account are applied in order while partitions run in parallel. Under load, a worker applies everything queued for its partition in one database transaction. Offsets are committed only after an event is fully handled.
-- **State store:** PostgreSQL as the source of truth. A trigger publishes every committed account change with `NOTIFY`, and a `version` column increases with each change. Redis turned out to be unnecessary (see [Measured Performance](#measured-performance)).
-- **Query API (Go):** A separate read service that serves balances and paginated history, and streams balance changes to clients over Server-Sent Events. It listens to Postgres `NOTIFY` and fans each change out to the clients watching that account. Also serves a demo page.
-- **Dead-letter queue (DLQ):** Events that can never succeed (malformed, invalid, or rejected by a business rule) go to a separate topic with the reason in the headers, so they never block the partition. A CLI lists them and replays them once the cause is fixed.
-- **Settlement worker and Temporal:** A withdrawal debits the account, then a durable workflow charges a mock payment provider. If the provider declines, or stays unavailable past a 2-minute deadline, the workflow refunds the account. The Processor never calls Temporal: it writes a row to a `settlements` outbox table in the same transaction as the debit, and the worker starts the workflows from there.
-- **OpenTelemetry:** A cross-cutting concern, not a pipeline stage. Every service emits traces and metrics to an OTel Collector. Trace context travels in Kafka message headers, so each event's trace covers API → Kafka → Processor. Database work is shared by a batch, so it appears in the first event's trace and links to the others.
-
-### Key Design Decisions
+## Design Decisions
 
 | Decision | Why |
 | --- | --- |
-| Partition by `account_id` | Guarantees per-account ordering without distributed locks |
-| Idempotent processing (dedupe on `event_id`) | Kafka delivers at least once; reprocessing a duplicate must not apply it twice |
-| Commit offsets after the state write | A crash causes a safe reprocess instead of data loss |
-| One worker goroutine per partition | Per-account ordering with parallelism across partitions, and no shared mutable state |
-| Retry transient errors, dead-letter permanent ones | A database outage must not flood the DLQ with valid events; a bad event must not block its partition |
-| Short session timeout + optional static membership | A crashed processor's partitions are reassigned in ~10 s, or immediately when it restarts with the same `KAFKA_GROUP_INSTANCE_ID` |
-| Separate read service (CQRS) | Reads and writes scale independently, and a burst of readers can't slow event processing |
-| Server-Sent Events instead of WebSocket | Updates only flow server → client, so plain HTTP with built-in browser reconnection is enough; no extra library or protocol |
-| Postgres `NOTIFY` from a trigger instead of an "account-updates" Kafka topic | `NOTIFY` is transactional: clients only hear about committed changes, and nothing can be published for a write that rolled back. Publishing to Kafka after the commit isn't atomic without an outbox. The tradeoff: a global lock at commit, which costs roughly 1.5–2× on p99 ([measured](docs/performance.md#other-things-tested)) and nothing at the median |
-| Version number on every account | Clients drop any update older than what they've shown, so reconnects and snapshot/update races never move a balance backwards |
-| Batched writes with no timer | Round trips and commits become per batch, which raised saturation about 10×; a batch is only what's already waiting, so light load adds no delay |
-| Schema-defined events (Protobuf, linted with buf) | Producers and consumers share one definition of an event |
-| Temporal only for multi-step workflows | Per-event consistency comes from partitioning, idempotency, and offset handling. Temporal is for what those can't do: a process spanning an external system, with a compensation step |
-| Transactional outbox between the Processor and Temporal | A debit can't commit without its settlement, a crash can't lose one, and a slow or unavailable Temporal delays settlements instead of event processing ([measured](docs/performance.md#settlements-and-the-hot-path)) |
-| Refunds are ordinary events with an ID derived from the withdrawal | They get the same ordering and live updates as everything else, and existing deduplication makes retrying the refund safe |
-| Instrument from day one | The latency targets can't be verified without end-to-end measurement |
+| Partition by `account_id`, one worker per partition | Per-account ordering and parallelism across accounts, with no distributed locks or shared mutable state |
+| Idempotent processing (dedupe on `event_id`) | Kafka delivers at least once, so a redelivered event must not apply twice |
+| Commit offsets only after the database commit | A crash causes a safe reprocess, never a lost event |
+| Batched writes with no timer | Round trips and fsyncs become per batch, which is where the 10× came from. A batch is only what's already waiting, so light load adds no delay |
+| Retry transient errors, dead-letter permanent ones | A database outage must not flood the DLQ with valid events, and a bad event must not block its partition |
+| Publish dead letters before the commit | A crash redelivers the batch and decides it identically; publishing afterward could re-decide a rejection against later balances |
+| Transactional outbox between the Processor and Temporal | A debit can't commit without its settlement, and a slow Temporal delays settlements rather than event processing |
+| Refunds are ordinary events with an ID derived from the withdrawal | They get the same ordering and live updates as everything else, and deduplication makes retries safe |
+| Postgres `NOTIFY` instead of a Kafka updates topic | It's transactional, so clients only hear about committed changes. The tradeoff is a global commit lock, which [costs roughly 1.5–2× on p99](docs/performance.md#other-things-tested) |
+| Server-Sent Events instead of WebSocket | Updates only flow one way, so plain HTTP with built-in reconnection is enough |
+| A version number on every account | Clients drop anything older than what they've shown, so a reconnect can never move a balance backward |
+| Separate read service (CQRS) | Reads and writes scale independently, and readers can't slow event processing |
+| No Redis | Reads straight from Postgres took 1.2 ms at p99 on their own and 20 ms under write load, so a cache would only add invalidation problems |
+| Integer minor units for money | Floating point can't represent cents exactly |
 
-### How the Processor Handles Failures
+## How It Handles Failure
 
 | Situation | What happens |
 | --- | --- |
-| Malformed or invalid event | Sent to the DLQ (`malformed` / `invalid`); processing continues |
-| Business rule fails | Sent to the DLQ (`insufficient_funds` for a debit that would overdraw, `currency_mismatch`, `balance_overflow`); the balance is untouched |
-| The database refuses a batch because of one event's contents | The batch is retried one event at a time, so only that event goes to the DLQ |
-| Duplicate delivery | Skipped: `event_id` is already in `processed_events` |
-| Postgres unavailable | Retried with exponential backoff (6 attempts, up to 5 s apart). If it still fails, the processor stops without committing that offset, and the event is retried after a restart |
-| Processor killed (`kill -9`) | Events whose offsets weren't committed are redelivered and deduplicated. Partitions move to another instance after the 10 s session timeout, or immediately on restart with static membership |
-| Graceful shutdown or rebalance | In-flight events finish, offsets are committed, and anything still buffered is left for the next owner of the partition |
-| Processor paused for minutes (e.g. the machine slept) with static membership | When it wakes, the broker can treat its retried join as a second member with the same instance ID and fence it. The processor stops with a fatal error instead of continuing in an unknown state; an orchestrator must restart it |
-| Query API loses its `LISTEN` connection | Reconnects with backoff, then sends every watched account a fresh snapshot, so changes made while disconnected aren't missed |
-| Settlement worker killed mid-workflow | Temporal resumes the workflow from the last completed step on restart. Verified with `kill -9` during a charge: the settlement finished, and a refund applied exactly once |
-| Settlement worker or Temporal down | Withdrawals still debit, and events keep flowing. Settlements wait in the outbox and complete when it's back |
-| Provider declines, or stays unavailable for 2 minutes | The workflow refunds the account. A real provider's timeout is ambiguous, because the charge may have gone through, so production would need to reconcile with the provider before refunding |
-| A client reads the stream slowly | Only its latest pending update is kept: it skips intermediate balances instead of slowing other clients down |
+| Duplicate delivery | Skipped: `event_id` is already recorded |
+| Malformed or invalid event | Sent to the DLQ with the reason; processing continues |
+| Debit that would overdraw, or wrong currency | Sent to the DLQ; the balance is untouched |
+| One event makes the database refuse a batch | The batch is retried one event at a time, so only that event goes to the DLQ |
+| Postgres unavailable | Retried with exponential backoff, then the Processor stops without committing that offset and retries after a restart |
+| Processor killed | Uncommitted events are redelivered and deduplicated. Partitions move to another instance within the 10 s session timeout, or immediately on restart with static membership (`KAFKA_GROUP_INSTANCE_ID`) |
+| Graceful shutdown or rebalance | In-flight events finish and offsets are committed before the partition moves |
+| Settlement worker killed mid-workflow | Temporal resumes from the last completed step on restart |
+| Settlement worker or Temporal down | Withdrawals still debit and events keep flowing. Settlements wait in the outbox |
+| Provider declines, or is unavailable for 2 minutes | The workflow refunds the account |
+| Query API loses its `LISTEN` connection | Reconnects, then sends every watched account a fresh snapshot |
+| A client reads the stream slowly | It skips intermediate balances instead of slowing other clients |
 
-## Project Structure
+Temporal's timeline makes this visible. Here the provider was unavailable through 10 attempts over 2 minutes, so the workflow gave up, published the refund, and recorded the outcome:
 
-```
-.
-├── Makefile                     # make up / down / build / test / test-integration / lint / dlq
-├── docker-compose.yml           # Kafka (KRaft), Postgres, OTel Collector, Jaeger, Prometheus, Grafana, Kafka UI
-├── buf.yaml, buf.gen.yaml       # Protobuf lint and code generation config
-├── proto/fintech/v1/            # Event schemas (source of truth)
-├── migrations/                  # Postgres schema (golang-migrate)
-├── deploy/                      # Config for the OTel Collector, Prometheus, Grafana (incl. dashboard)
-├── docs/ROADMAP.md              # Phase-by-phase task checklist
-├── loadtest/k6.js               # Load test script
-├── .github/workflows/ci.yml     # Build, vet, unit + integration tests, lint on every push
-└── src/
-    ├── cmd/
-    │   ├── api/                 # Event API: HTTP → validate → Kafka
-    │   ├── processor/           # Processor entry point (logic lives in pkg/processor)
-    │   ├── query/               # Query API entry point (logic lives in pkg/query)
-    │   ├── worker/              # Settlement worker: Temporal workflows + outbox relay
-    │   ├── dlq/                 # List and replay dead-lettered events
-    │   └── loadgen/             # Fixed-rate load generator for the Event API
-    ├── gen/fintech/v1/          # Generated Protobuf code (do not edit; run `make proto`)
-    └── pkg/
-        ├── config/              # Environment-based configuration
-        ├── events/              # Event validation shared by the API and the Processor
-        ├── processor/           # Partition workers, retries, DLQ, Postgres store, integration tests
-        ├── query/               # Read API, SSE stream, NOTIFY listener, demo page, integration tests
-        ├── workflow/            # Settlement workflow, activities, mock provider, outbox relay
-        └── telemetry/otel.go    # OpenTelemetry setup
-```
+![Temporal timeline: ChargeProvider fails 10 times, then PublishRefund and RecordOutcome complete](docs/images/temporal.png)
 
-## Phased Plan
+## What Testing Caught
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed task checklist and done-when criteria for each phase.
+Most of these only appeared because of testing against real infrastructure, or because a surprising measurement got investigated instead of explained away.
 
-1. **Phase 1 – Foundations:** Add `go.mod`, define the event schema, and modernize the local stack (Kafka in KRaft mode, Postgres, OTel Collector, Prometheus, Grafana) in `docker-compose.yml`.
-2. **Phase 2 – Core pipeline + observability:** Event API → Kafka → Processor → Postgres, with OpenTelemetry tracing and the end-to-end latency histogram in place from the start. Measure a baseline.
-3. **Phase 3 – Correctness:** Idempotency, offset commit strategy, retries, DLQ, and graceful shutdown. Add unit and integration tests.
-4. **Phase 4 – Serving layer:** Query API and WebSocket push. Add Redis caching if read latency calls for it.
-5. **Phase 5 – Performance:** Load test against the targets, find the saturation point, and tune (partitions, batching, consumer concurrency, connection pools).
-6. **Phase 6 – Workflows:** Add Temporal for one real multi-step flow (e.g. settlement).
-7. **Phase 7 – Deployment:** Kubernetes manifests / Helm, managed Kafka, and a production readiness checklist.
+| Found by | Problem | Fix |
+| --- | --- | --- |
+| Chaos test | Deposits were rejected as "insufficient funds" on accounts that were already negative | Only debits can be refused for lack of funds; regression test added |
+| Chaos test | After `kill -9`, nothing processed for 75 s while Kafka waited for the dead consumer | Shorter session timeout and optional static membership: **75 s → 0.1 s** |
+| CI | A worker failing during shutdown could make the Processor exit with status 0, hiding the failure from an orchestrator | Check for worker errors after all workers stop. It only reproduced on CI's runners |
+| Code review of batching | A rejected first event set a new account's currency, so the next valid event was refused | The currency now comes from the first *applied* event; regression test added |
+| Profiling | An earlier conclusion that `NOTIFY` had no measurable cost was wrong: per-event round trips had been hiding its global commit lock | Corrected, and [measured properly](docs/performance.md#other-things-tested) |
+| 10-minute test | The 60 s runs looked far better than the system really is, because most contained no checkpoint | Results now report the sustained numbers, and the p99 target is marked as missed |
+| Fresh-clone test | `make demo-load` failed because of a Compose dependency across profiles | Fixed, and it now runs in CI |
 
-## Local Environment
+## Observability
 
-**Prerequisites:** Go (see `go.mod` for the version), Docker, [buf](https://buf.build/docs/installation), `protoc-gen-go`, and `golangci-lint`.
+Every service exports traces and metrics through an OTel Collector. Trace context travels in Kafka headers, so one trace follows an event across services. This one took 16.8 ms from the API request to the database commit:
 
-1. **Start the stack, create the topics, and run migrations:**
-   ```bash
-   make up
-   ```
-2. **Run the Event API, the Processor, and the Query API** (in separate terminals):
-   ```bash
-   make run-api
-   make run-processor
-   make run-query
-   make run-worker
-   ```
-   Then open the demo page at **http://localhost:8082**: deposits and withdrawals show up live, with the time from click to update. Withdraw an amount ending in `.13` to watch the mock provider decline it and the workflow refund it. Other endings: `.99` fails twice and then succeeds, and `.98` stays unavailable until the workflow gives up and refunds after 2 minutes.
-3. **Send a transaction:**
-   ```bash
-   curl -X POST localhost:8081/transactions \
-     -d '{"account_id":"acct-1","type":"deposit","amount_minor":5000,"currency":"USD"}'
-   # {"event_id":"..."}  (202 Accepted: stored in Kafka, applied shortly after)
-   ```
-   `type` is one of `deposit`, `withdrawal`, `transfer_in`, `transfer_out`. Amounts are in minor units (cents). Send an `event_id` (UUID) to make retries safe: the Processor applies each ID only once.
-4. **Read the balance and history, or watch it live:**
-   ```bash
-   curl localhost:8082/accounts/acct-1
-   curl "localhost:8082/accounts/acct-1/transactions?limit=10"   # newest first; pass next_cursor to page
-   curl -N localhost:8082/accounts/acct-1/events                 # Server-Sent Events: snapshot, then each change
-   ```
-5. **Generate load:**
-   ```bash
-   make loadgen ARGS="-rate 200 -duration 60s"
-   # -debits adds withdrawals (some get rejected for insufficient funds)
-   # -record ids.txt saves accepted event IDs so you can check none were lost
-   ```
-6. **Inspect and replay the DLQ:**
-   ```bash
-   make dlq          # list dead-lettered events with their reason
-   make dlq-replay   # republish them to the main topic once the cause is fixed
-   ```
-7. **Explore:**
+![Jaeger trace of one event from the Event API through Kafka to the Processor and Postgres](docs/images/trace.png)
 
-   | Service | URL |
-   | --- | --- |
-   | Grafana: **Fintech → Transaction Pipeline** dashboard (latency, throughput, lag) | http://localhost:3000 |
-   | Jaeger: end-to-end traces (API → Kafka → Processor → Postgres) | http://localhost:16686 |
-   | Kafka UI (topics, messages, consumer groups) | http://localhost:8080 |
-   | Prometheus | http://localhost:9090 |
-   | Demo page and Query API | http://localhost:8082 |
-   | Temporal UI (settlement workflows and their history) | http://localhost:8233 |
-   | Event API | http://localhost:8081 |
-   | Kafka (from the host) | `localhost:9092` |
-   | Postgres | `localhost:5432` (user/password/db: `fintech`) |
-   | OTLP endpoint | `localhost:4317` (gRPC), `localhost:4318` (HTTP) |
+The Grafana dashboard covers end-to-end latency, throughput, consumer lag, DLQ rate, push latency, latency per stage, and settlements. This capture is at 400 events/s:
 
-8. **Stop:** `make down` (use `docker compose down -v` to also delete the Postgres data).
-
-**Configuration** is read from environment variables:
-
-| Variable | Default |
-| --- | --- |
-| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` |
-| `KAFKA_TOPIC` | `transactions` |
-| `KAFKA_DLQ_TOPIC` | `transactions.dlq` |
-| `KAFKA_GROUP_ID` | `transaction-processor` |
-| `KAFKA_GROUP_INSTANCE_ID` | unset. Set a unique, stable ID per Processor instance for static membership |
-| `DATABASE_URL` | `postgres://fintech:fintech@localhost:5432/fintech?sslmode=disable` |
-| `HTTP_ADDR` (Event API) | `:8081` |
-| `CORS_ALLOWED_ORIGINS` (Event API) | `http://localhost:8082`, comma-separated |
-| `PROCESSOR_MAX_BATCH` | `500`: most events applied in one database transaction |
-| `TEMPORAL_ADDRESS` (Settlement worker) | `localhost:7233` |
-| `PROVIDER_DELAY` (Settlement worker) | `500ms`. Raise it to have time to kill the worker mid-charge |
-| `PPROF_ADDR` (Event API, Processor) | unset. Set to e.g. `localhost:6060` to serve Go profiles |
-| `QUERY_HTTP_ADDR` (Query API) | `:8082` |
-| `EVENT_API_URL` (Query API, used by the demo page) | `http://localhost:8081` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` |
-
-**Changing the event schema:** edit `proto/fintech/v1/*.proto`, then run `make proto` and commit the regenerated code.
-
-## Cloud Deployment
-
-1. **Infrastructure:** Provision managed Kafka (e.g. Amazon MSK or Confluent Cloud), managed Postgres, and a Kubernetes cluster with Terraform.
-2. **Configuration:** Supply `bootstrap.servers`, credentials (SASL/TLS), and database URLs through environment variables / Kubernetes Secrets. Never hard-code them.
-3. **Production readiness checklist:**
-   - Topics created with the right partition count and replication factor ≥ 3
-   - Credentials and least-privilege ACLs verified
-   - Liveness/readiness probes and graceful shutdown in place
-   - Dashboards and alerts for latency, error rate, and consumer lag
-   - Integration tests passing against the deployed environment
-
-## Load Testing
-
-An event pipeline is tested by **event rate**, not by concurrent users.
-
-1. **Tools:** `k6` for the Event API (HTTP), and the [xk6-kafka](https://github.com/mostafa/xk6-kafka) extension or a Go load generator to produce directly to Kafka.
-2. **Scenario:**
-   - Ramp from 0 to 5,000 events/s over 2 minutes.
-   - Hold for 10 minutes.
-   - Step up in increments to find the saturation point.
-3. **Run:**
-   ```bash
-   k6 run loadtest/k6.js
-   ```
-4. **Observe:** Watch end-to-end latency percentiles, throughput, error rate, and consumer lag in Grafana.
+![Grafana dashboard showing latency, throughput, consumer lag, and API request rate](docs/images/grafana.png)
 
 ## Testing
 
 ```bash
 make test               # unit tests, no Docker needed
-make test-integration   # starts real Kafka and Postgres with Testcontainers (needs Docker)
+make test-integration   # real Kafka and Postgres with Testcontainers
+make smoke              # end-to-end against a running system
 ```
 
-**Unit tests** cover request and event validation, CORS, error classification (transient vs. permanent), retry/backoff behavior, trace propagation through Kafka headers, the live-update hub (fan-out, latest-wins), and pagination cursors.
+**CI** runs on every push, with five jobs:
+- build, vet, unit tests with the race detector, and lint
+- integration tests
+- Protobuf lint
+- `make demo` from a clean checkout, then the smoke test and load generator
+- deploying to a real Kubernetes cluster, then the smoke test
 
-**Workflow tests** ([src/pkg/workflow/settlement_test.go](src/pkg/workflow/settlement_test.go)) run the real workflow and activity code in Temporal's test environment: a successful charge, a decline that isn't retried, retries that eventually succeed, a provider down past the deadline, and a refund that keeps retrying until it succeeds. Integration tests cover the outbox relay against real Postgres, including Temporal failing partway through a batch.
+**Processor integration tests** run the real Processor against real Kafka and Postgres, including:
+- ordering across concurrent partitions
+- duplicate delivery
+- a crash between the database write and the offset commit
+- replaying the whole topic
+- DLQ routing, and one bad event inside a batch
+- graceful shutdown
 
-**Settlement crash test (manual):** against a real Temporal server, the worker was killed with `kill -9` during a charge, for both a normal withdrawal and a declined one. On restart, both workflows finished, the balance was right, and the refund applied exactly once. Withdrawals made with the worker stopped kept debiting, waited in the outbox, and settled once it restarted.
+Breaking deduplication on purpose made the duplicate, crash, and replay tests fail, so they do catch what they're meant to catch.
 
-**Query API integration tests** ([src/pkg/query/integration_test.go](src/pkg/query/integration_test.go)) run against real Postgres with the migrations and triggers applied. They cover the stream sending a snapshot then live changes, a new account's stream starting with `not_found`, no leaking of other accounts' updates, the account endpoint, and keyset pagination across pages.
+**Workflow tests** run the real workflow and activity code in Temporal's test environment: success, a decline that isn't retried, retries that eventually succeed, a provider down past the deadline, and a refund that keeps retrying until it succeeds.
 
-**Processor integration tests** ([src/pkg/processor/integration_test.go](src/pkg/processor/integration_test.go)) run the real Processor against real Kafka and Postgres:
+**Chaos tests (run by hand):**
 
-| Test | Proves |
+| Scenario | Result |
 | --- | --- |
-| `TestAppliesEventsInOrderPerAccount` | Per-account ordering holds while partitions run concurrently (an out-of-order withdrawal would overdraw) |
-| `TestDuplicateDeliveryIsAppliedOnce` | The same event delivered three times changes the balance once |
-| `TestCrashBetweenWriteAndOffsetCommit` | A crash after the DB write but before the offset commit doesn't double-apply after restart |
-| `TestFullReplayIsIdempotent` | Reprocessing the entire topic from the beginning leaves balances unchanged |
-| `TestInvalidEventsGoToDLQ` | Malformed, invalid, overdraft, and currency-mismatch events land in the DLQ with the right reason, and valid events keep flowing |
-| `TestCreditsAreAcceptedIntoNegativeAccount` | Only debits can be refused for insufficient funds (a regression found by the chaos test) |
-| `TestWithdrawalRecordsSettlementWithItsDebit` | A settlement commits with its debit; rejected withdrawals and redeliveries don't create one |
-| `TestBatchDecidesEventsInOrder` | Inside one batch, each event sees the effect of those before it, and a rejection doesn't affect the rest |
-| `TestPoisonEventDoesNotFailItsBatch` | When the database refuses a batch because of one event, only that event goes to the DLQ |
-| `TestRejectedEventDoesNotSetNewAccountCurrency` | A rejected event can't decide a new account's currency |
-| `TestBalanceOverflowIsRejected` | A credit that would overflow a balance goes to the DLQ |
-| `TestGracefulShutdownCommitsOffsets` | After a clean stop, a restarted processor doesn't see already-handled events |
+| `kill -9` the Processor twice at 1,500 events/s | All 59,640 accepted events applied exactly once |
+| `kill -9` the settlement worker during a charge | The workflow finished after restart, and a refund applied exactly once |
+| On Kubernetes: force-delete Processor and worker pods and scale up under load | All 11,997 accepted events applied, and all 1,001 account balances matched their ledgers |
 
-Breaking deduplication on purpose makes the duplicate, crash, and replay tests fail, so they do catch the bugs they're meant to catch.
+## Running It
 
-**Chaos test (manual):** with `make loadgen` sending 1,500 events/s and `-record` saving every accepted ID, the Processor was killed with `kill -9` twice and restarted. All 59,640 accepted events were applied exactly once (none missing, and the total balance change matched the sum of the events), and the restarted processor got its partitions back within 0.1 s using static membership.
+**Everything in Docker:** `make demo`, as above.
 
-## Technical Challenges
+**On Kubernetes** (needs Docker, [kind](https://kind.sigs.k8s.io/), and `kubectl`):
 
-### Ordering and Concurrency
+```bash
+make k8s-up        # create a local cluster, build and load images, deploy
+make k8s-smoke     # run the smoke test against the cluster
+make k8s-forward   # then open http://localhost:8082
+make k8s-down      # delete the cluster
+```
 
-**Why it's hard:** Processing many events in parallel can apply events for the same account out of order or cause race conditions.
+The Processor runs as 2 replicas sharing the topic's partitions: `kubectl -n fintech scale deployment/processor --replicas=3` rebalances them live. The manifests are in [deploy/k8s](deploy/k8s).
 
-**How it's solved:** Partitioning by `account_id` plus a single owner per partition gives per-account ordering and parallelism across accounts, without locks or shared mutable state.
+**From source, for development** (needs Go; see `go.mod` for the version):
 
-### Correctness Under Failure
+```bash
+make up              # backing services, topics, and migrations
+make run-api         # each of these in its own terminal
+make run-processor
+make run-query
+make run-worker
+```
 
-**Why it's hard:** Kafka delivers at least once. Crashes, rebalances, and retries can cause the same event to be processed twice or lost.
+To change the event schema, install [buf](https://buf.build/docs/installation) and `protoc-gen-go`, edit `proto/fintech/v1/`, and run `make proto`. `make lint` also needs `golangci-lint`.
 
-**How it's solved:** Idempotent writes keyed by `event_id`, committing offsets only after an event is fully handled, bounded retries for transient errors, and a DLQ for events that can never succeed. See [How the Processor Handles Failures](#how-the-processor-handles-failures).
+**API:**
 
-### Observability
+```bash
+curl -X POST localhost:8081/transactions \
+  -d '{"account_id":"acct-1","type":"deposit","amount_minor":5000,"currency":"USD"}'
+# 202 {"event_id":"..."}: stored in Kafka, applied shortly after
 
-**Why it's hard:** In an asynchronous pipeline, a slow or failing event is hard to trace across services.
+curl localhost:8082/accounts/acct-1                               # balance
+curl "localhost:8082/accounts/acct-1/transactions?limit=10"       # history, newest first
+curl -N localhost:8082/accounts/acct-1/events                     # live updates
+```
 
-**How it's solved:** OpenTelemetry trace context passed through Kafka headers, an end-to-end latency histogram, and consumer lag metrics with alerting.
+`type` is one of `deposit`, `withdrawal`, `transfer_in`, or `transfer_out`. Send an `event_id` (UUID) to make retries safe. The mock provider picks its behavior from an amount's last two digits: `13` is declined, `99` fails twice and then succeeds, and `98` stays unavailable until the workflow refunds after 2 minutes.
 
-## Learning Goals
+**Load testing:**
 
-- Build an event-driven pipeline in Go with Kafka (partitioning, consumer groups, delivery semantics)
-- Design for correctness: idempotency, ordering, retries, and dead-letter queues
-- Instrument a distributed system end to end with OpenTelemetry
-- Measure and tune performance against explicit latency and throughput targets
-- Use Temporal where it fits best: long-running, multi-step workflows
+```bash
+make demo-load                                         # 60 s of traffic through the demo
+make loadgen ARGS="-direct -rate 5000 -duration 60s"   # straight to Kafka, skipping HTTP
+k6 run -e TARGET=5000 -e HOLD=10m loadtest/k6.js       # ramp and hold against the Event API
+```
 
-## Learning Resources
+<details>
+<summary><strong>Configuration</strong> (environment variables)</summary>
 
-- **Go:** [A Tour of Go](https://go.dev/tour/), [Effective Go](https://go.dev/doc/effective_go), [Go by Example](https://gobyexample.com/)
-- **Kafka:** [Kafka documentation](https://kafka.apache.org/documentation/), [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go)
-- **Temporal:** [Temporal Go SDK docs](https://docs.temporal.io/develop/go)
-- **OpenTelemetry:** [OpenTelemetry Go docs](https://opentelemetry.io/docs/languages/go/)
+| Variable | Default |
+| --- | --- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` |
+| `KAFKA_TOPIC` / `KAFKA_DLQ_TOPIC` | `transactions` / `transactions.dlq` |
+| `KAFKA_GROUP_ID` | `transaction-processor` |
+| `KAFKA_GROUP_INSTANCE_ID` | Unset. Set a unique, stable ID per Processor for static membership |
+| `DATABASE_URL` | `postgres://fintech:fintech@localhost:5432/fintech?sslmode=disable` |
+| `PROCESSOR_MAX_BATCH` | `500` |
+| `HTTP_ADDR` (Event API) | `:8081` |
+| `CORS_ALLOWED_ORIGINS` (Event API) | `http://localhost:8082` |
+| `QUERY_HTTP_ADDR` (Query API) | `:8082` |
+| `EVENT_API_URL` (demo page) | `http://localhost:8081` |
+| `TEMPORAL_ADDRESS` | `localhost:7233` |
+| `PROVIDER_DELAY` (mock provider) | `500ms`. Raise it to have time to kill the worker mid-charge |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | Sample 100%. Use `parentbased_traceidratio` / `0.01` for long load tests |
+| `PPROF_ADDR` (Event API, Processor) | Unset. Set to `localhost:6060` to serve Go profiles |
+
+</details>
+
+## Project Structure
+
+```
+.
+├── Makefile                  # make demo, test, k8s-up, and everything else
+├── Dockerfile                # One multi-stage build for any service
+├── docker-compose.yml        # Backing services, plus the app under a profile
+├── proto/fintech/v1/         # Event schema
+├── migrations/               # Postgres schema
+├── deploy/                   # Kubernetes manifests; OTel, Prometheus, and Grafana config
+├── docs/                     # Performance write-up and roadmap
+├── loadtest/k6.js            # k6 load test
+├── scripts/                  # Smoke test and Kubernetes helpers
+└── src/
+    ├── cmd/                  # Entry points: api, processor, query, worker, dlq, loadgen
+    ├── gen/                  # Generated Protobuf code
+    └── pkg/
+        ├── processor/        # Partition workers, batching, retries, DLQ, integration tests
+        ├── query/            # Read API, SSE stream, NOTIFY listener, demo page
+        ├── workflow/         # Settlement workflow, activities, mock provider, outbox relay
+        ├── events/           # Validation shared by the API and the Processor
+        ├── telemetry/        # OpenTelemetry setup and Kafka trace propagation
+        └── config/           # Environment-based configuration
+```
+
+## Not Production-Ready
+
+This is a portfolio project, and these were left out on purpose:
+
+- **Authentication:** anyone who can reach the APIs can read any account or submit transactions.
+- **Atomic transfers:** `transfer_in` and `transfer_out` are independent events, so one side can fail alone. A workflow like settlement is the natural fix.
+- **Provider reconciliation:** a real provider's timeout is ambiguous because the charge may have gone through, so it would need checking before a refund.
+- **Durable infrastructure:** one Kafka broker with replication factor 1, one Postgres, and a Temporal dev server that keeps its state in memory. Real credentials would also come from a secret manager, not committed config.
+- **Data retention:** `processed_events` grows without limit.
+- **Cloud deployment and operations:** Terraform, autoscaling on consumer lag, and alerting.
+
+## More
+
+- [docs/performance.md](docs/performance.md): how throughput went up about 10×, how the bottleneck was found, and what still limits it
+- [docs/ROADMAP.md](docs/ROADMAP.md): the phase-by-phase build plan

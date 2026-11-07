@@ -148,6 +148,28 @@ Withdrawals settle through Temporal, but the Processor never calls it: it writes
 - **Results drift as data grows.** `processed_events` passed 18M rows during testing, with a 1.3 GB primary key index on random UUIDs, larger than `shared_buffers`. Random keys touch pages across the whole index, which means more page writes after each checkpoint. Time-ordered IDs (UUIDv7) or partitioning by time are the obvious next steps, and neither has been tested.
 - **One machine.** Real hardware with separate brokers and a dedicated database disk would behave differently.
 
+## Earlier phases
+
+Numbers from before batching, kept for the record. The Phase 4 runs were on battery power.
+
+| Phase | Design | Saturation | Latency below saturation (p50 / p95 / p99) |
+| --- | --- | --- | --- |
+| 2 | One goroutine, one transaction per event | ~650 events/s | 8 / 19 / 83 ms at 300/s |
+| 3 | One worker per partition, one transaction per event | ~1,700–2,000 events/s | 8 / 36 / 163 ms at 1,000/s |
+
+Going from one worker to six gave about 3×, not 6×, which was an early hint that the database was the limit.
+
+**Reads** (`GET /accounts/{id}` at 2,000 reads/s, Phase 4):
+
+| Conditions | p50 | p95 | p99 |
+| --- | --- | --- | --- |
+| Reads only | 0.4 ms | 0.7 ms | 1.2 ms |
+| With 1,000 writes/s in parallel | 1.0 ms | 4.6 ms | 20 ms |
+
+These are within the 30 ms target, which is why there's no Redis cache.
+
+**Live push:** at 1,000 events/s, latency to the Query API was 10 / 88 / 361 ms (p50 / p95 / p99), the same as commit latency, so delivering the change adds almost nothing on top of committing it.
+
 ## Reproducing
 
 ```bash
