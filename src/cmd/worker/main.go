@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
+	sdklog "go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/jeffrey-almanzar/realtime-fintech-event-processing/src/pkg/config"
@@ -61,7 +63,11 @@ func run() error {
 	}
 	defer producer.Close()
 
-	temporal, err := client.Dial(client.Options{HostPort: config.TemporalAddress()})
+	temporal, err := client.Dial(client.Options{
+		HostPort: config.TemporalAddress(),
+		// The SDK's default logger writes DEBUG lines for every activity.
+		Logger: sdklog.NewStructuredLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))),
+	})
 	if err != nil {
 		return err
 	}
