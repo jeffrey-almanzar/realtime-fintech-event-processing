@@ -204,8 +204,6 @@ services:
         SERVICE: loadgen
     environment: *app-env
     command: ["-url", "http://api:8081/transactions", "-rate", "200", "-duration", "60s", "-debits"]
-    depends_on:
-      - api
 
 volumes:
   postgres-data:

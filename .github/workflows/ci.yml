@@ -56,6 +56,9 @@ jobs:
       - name: Smoke test
         run: make smoke
 
+      - name: Load generator
+        run: make demo-load
+
       - name: Logs on failure
         if: failure()
         run: docker compose --profile app logs --tail=60 api processor query worker temporal migrate kafka-init
