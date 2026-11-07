@@ -54,6 +54,7 @@ func TestSignedAmount(t *testing.T) {
 	}{
 		{fintechv1.TransactionType_TRANSACTION_TYPE_DEPOSIT, 250},
 		{fintechv1.TransactionType_TRANSACTION_TYPE_TRANSFER_IN, 250},
+		{fintechv1.TransactionType_TRANSACTION_TYPE_REFUND, 250},
 		{fintechv1.TransactionType_TRANSACTION_TYPE_WITHDRAWAL, -250},
 		{fintechv1.TransactionType_TRANSACTION_TYPE_TRANSFER_OUT, -250},
 	}

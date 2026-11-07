@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 // Kafka holds the settings shared by producers and consumers.
@@ -44,6 +45,21 @@ func ProcessorMaxBatch() int {
 		return 500
 	}
 	return n
+}
+
+// TemporalAddress returns the Temporal server's host:port.
+func TemporalAddress() string {
+	return getEnv("TEMPORAL_ADDRESS", "localhost:7233")
+}
+
+// ProviderDelay is how long the mock payment provider takes per charge. Raise
+// it to have time to kill the worker in the middle of a settlement.
+func ProviderDelay() time.Duration {
+	d, err := time.ParseDuration(getEnv("PROVIDER_DELAY", "500ms"))
+	if err != nil {
+		return 500 * time.Millisecond
+	}
+	return d
 }
 
 // HTTPAddr returns the address the Event API listens on.

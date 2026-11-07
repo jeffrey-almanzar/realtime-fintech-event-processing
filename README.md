@@ -6,7 +6,7 @@
 
 **Technologies:** Go, Kafka, PostgreSQL, Temporal, OpenTelemetry, Prometheus / Grafana, Kubernetes
 
-**Status:** 🚧 Phase 5 (Performance) complete: events flow from the Event API through Kafka to the Processor and into Postgres, and users see balance changes live: a Query API streams every committed change over Server-Sent Events, with a demo page at http://localhost:8082. Processing is ordered per account, idempotent, retried on transient errors, and dead-lettered on permanent ones, verified by integration and crash tests. See [Measured Performance](#measured-performance) for how it does against the targets below.
+**Status:** 🚧 Phase 6 (Workflows) complete: events flow from the Event API through Kafka to the Processor and into Postgres, and users see balance changes live: a Query API streams every committed change over Server-Sent Events, with a demo page at http://localhost:8082. Processing is ordered per account, idempotent, retried on transient errors, and dead-lettered on permanent ones. Withdrawals settle through a Temporal workflow that refunds the account if the payment provider fails. All of this is verified by integration and crash tests. See [Measured Performance](#measured-performance) for how it does against the targets below.
 
 ## Goals and Targets
 
@@ -83,7 +83,8 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 (HTTP)        keyed by account_id             │  idempotent, ordered per partition, batched writes
                                               ├──▶ State store (Postgres) ──NOTIFY──▶ Query API ──SSE──▶ users (demo page)
                                               ├──▶ DLQ topic "transactions.dlq" (events that fail validation/processing)
-                                              └──▶ Temporal (only for multi-step flows, e.g. settlement, refunds)
+                                              └──▶ Outbox table ──▶ Settlement worker ──▶ Temporal ──▶ mock payment provider
+                                                                     │  (declined: refund event back into Kafka)
 ```
 
 ### Components
@@ -94,7 +95,7 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 - **State store:** PostgreSQL as the source of truth. A trigger publishes every committed account change with `NOTIFY`, and a `version` column increases with each change. Redis turned out to be unnecessary (see [Measured Performance](#measured-performance)).
 - **Query API (Go):** A separate read service that serves balances and paginated history, and streams balance changes to clients over Server-Sent Events. It listens to Postgres `NOTIFY` and fans each change out to the clients watching that account. Also serves a demo page.
 - **Dead-letter queue (DLQ):** Events that can never succeed (malformed, invalid, or rejected by a business rule) go to a separate topic with the reason in the headers, so they never block the partition. A CLI lists them and replays them once the cause is fixed.
-- **Temporal:** Orchestrates long-running, multi-step business processes started by specific events (e.g. settlement, refunds, chargebacks). It is deliberately kept **off** the per-event path to protect latency.
+- **Settlement worker and Temporal:** A withdrawal debits the account, then a durable workflow charges a mock payment provider. If the provider declines, or stays unavailable past a 2-minute deadline, the workflow refunds the account. The Processor never calls Temporal: it writes a row to a `settlements` outbox table in the same transaction as the debit, and the worker starts the workflows from there.
 - **OpenTelemetry:** A cross-cutting concern, not a pipeline stage. Every service emits traces and metrics to an OTel Collector. Trace context travels in Kafka message headers, so each event's trace covers API → Kafka → Processor. Database work is shared by a batch, so it appears in the first event's trace and links to the others.
 
 ### Key Design Decisions
@@ -113,7 +114,9 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 | Version number on every account | Clients drop any update older than what they've shown, so reconnects and snapshot/update races never move a balance backwards |
 | Batched writes with no timer | Round trips and commits become per batch, which raised saturation about 10×; a batch is only what's already waiting, so light load adds no delay |
 | Schema-defined events (Protobuf, linted with buf) | Producers and consumers share one definition of an event |
-| Temporal only for multi-step workflows | Workflow starts add tens of ms; per-event consistency comes from the three items above |
+| Temporal only for multi-step workflows | Per-event consistency comes from partitioning, idempotency, and offset handling. Temporal is for what those can't do: a process spanning an external system, with a compensation step |
+| Transactional outbox between the Processor and Temporal | A debit can't commit without its settlement, a crash can't lose one, and a slow or unavailable Temporal delays settlements instead of event processing ([measured](docs/performance.md#settlements-and-the-hot-path)) |
+| Refunds are ordinary events with an ID derived from the withdrawal | They get the same ordering and live updates as everything else, and existing deduplication makes retrying the refund safe |
 | Instrument from day one | The latency targets can't be verified without end-to-end measurement |
 
 ### How the Processor Handles Failures
@@ -129,6 +132,9 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
 | Graceful shutdown or rebalance | In-flight events finish, offsets are committed, and anything still buffered is left for the next owner of the partition |
 | Processor paused for minutes (e.g. the machine slept) with static membership | When it wakes, the broker can treat its retried join as a second member with the same instance ID and fence it. The processor stops with a fatal error instead of continuing in an unknown state; an orchestrator must restart it |
 | Query API loses its `LISTEN` connection | Reconnects with backoff, then sends every watched account a fresh snapshot, so changes made while disconnected aren't missed |
+| Settlement worker killed mid-workflow | Temporal resumes the workflow from the last completed step on restart. Verified with `kill -9` during a charge: the settlement finished, and a refund applied exactly once |
+| Settlement worker or Temporal down | Withdrawals still debit, and events keep flowing. Settlements wait in the outbox and complete when it's back |
+| Provider declines, or stays unavailable for 2 minutes | The workflow refunds the account. A real provider's timeout is ambiguous, because the charge may have gone through, so production would need to reconcile with the provider before refunding |
 | A client reads the stream slowly | Only its latest pending update is kept: it skips intermediate balances instead of slowing other clients down |
 
 ## Project Structure
@@ -149,6 +155,7 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
     │   ├── api/                 # Event API: HTTP → validate → Kafka
     │   ├── processor/           # Processor entry point (logic lives in pkg/processor)
     │   ├── query/               # Query API entry point (logic lives in pkg/query)
+    │   ├── worker/              # Settlement worker: Temporal workflows + outbox relay
     │   ├── dlq/                 # List and replay dead-lettered events
     │   └── loadgen/             # Fixed-rate load generator for the Event API
     ├── gen/fintech/v1/          # Generated Protobuf code (do not edit; run `make proto`)
@@ -157,7 +164,7 @@ Event API ──▶ Kafka topic "transactions" ──▶ Processor (Go, consumer
         ├── events/              # Event validation shared by the API and the Processor
         ├── processor/           # Partition workers, retries, DLQ, Postgres store, integration tests
         ├── query/               # Read API, SSE stream, NOTIFY listener, demo page, integration tests
-        ├── workflow/temporal.go # Temporal worker setup
+        ├── workflow/            # Settlement workflow, activities, mock provider, outbox relay
         └── telemetry/otel.go    # OpenTelemetry setup
 ```
 
@@ -186,8 +193,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed task checklist and done-
    make run-api
    make run-processor
    make run-query
+   make run-worker
    ```
-   Then open the demo page at **http://localhost:8082**: deposits and withdrawals show up live, with the time from click to update.
+   Then open the demo page at **http://localhost:8082**: deposits and withdrawals show up live, with the time from click to update. Withdraw an amount ending in `.13` to watch the mock provider decline it and the workflow refund it. Other endings: `.99` fails twice and then succeeds, and `.98` stays unavailable until the workflow gives up and refunds after 2 minutes.
 3. **Send a transaction:**
    ```bash
    curl -X POST localhost:8081/transactions \
@@ -221,6 +229,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed task checklist and done-
    | Kafka UI (topics, messages, consumer groups) | http://localhost:8080 |
    | Prometheus | http://localhost:9090 |
    | Demo page and Query API | http://localhost:8082 |
+   | Temporal UI (settlement workflows and their history) | http://localhost:8233 |
    | Event API | http://localhost:8081 |
    | Kafka (from the host) | `localhost:9092` |
    | Postgres | `localhost:5432` (user/password/db: `fintech`) |
@@ -240,6 +249,10 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed task checklist and done-
 | `DATABASE_URL` | `postgres://fintech:fintech@localhost:5432/fintech?sslmode=disable` |
 | `HTTP_ADDR` (Event API) | `:8081` |
 | `CORS_ALLOWED_ORIGINS` (Event API) | `http://localhost:8082`, comma-separated |
+| `PROCESSOR_MAX_BATCH` | `500`: most events applied in one database transaction |
+| `TEMPORAL_ADDRESS` (Settlement worker) | `localhost:7233` |
+| `PROVIDER_DELAY` (Settlement worker) | `500ms`. Raise it to have time to kill the worker mid-charge |
+| `PPROF_ADDR` (Event API, Processor) | unset. Set to e.g. `localhost:6060` to serve Go profiles |
 | `QUERY_HTTP_ADDR` (Query API) | `:8082` |
 | `EVENT_API_URL` (Query API, used by the demo page) | `http://localhost:8081` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` |
@@ -281,6 +294,10 @@ make test-integration   # starts real Kafka and Postgres with Testcontainers (ne
 
 **Unit tests** cover request and event validation, CORS, error classification (transient vs. permanent), retry/backoff behavior, trace propagation through Kafka headers, the live-update hub (fan-out, latest-wins), and pagination cursors.
 
+**Workflow tests** ([src/pkg/workflow/settlement_test.go](src/pkg/workflow/settlement_test.go)) run the real workflow and activity code in Temporal's test environment: a successful charge, a decline that isn't retried, retries that eventually succeed, a provider down past the deadline, and a refund that keeps retrying until it succeeds. Integration tests cover the outbox relay against real Postgres, including Temporal failing partway through a batch.
+
+**Settlement crash test (manual):** against a real Temporal server, the worker was killed with `kill -9` during a charge, for both a normal withdrawal and a declined one. On restart, both workflows finished, the balance was right, and the refund applied exactly once. Withdrawals made with the worker stopped kept debiting, waited in the outbox, and settled once it restarted.
+
 **Query API integration tests** ([src/pkg/query/integration_test.go](src/pkg/query/integration_test.go)) run against real Postgres with the migrations and triggers applied. They cover the stream sending a snapshot then live changes, a new account's stream starting with `not_found`, no leaking of other accounts' updates, the account endpoint, and keyset pagination across pages.
 
 **Processor integration tests** ([src/pkg/processor/integration_test.go](src/pkg/processor/integration_test.go)) run the real Processor against real Kafka and Postgres:
@@ -293,6 +310,11 @@ make test-integration   # starts real Kafka and Postgres with Testcontainers (ne
 | `TestFullReplayIsIdempotent` | Reprocessing the entire topic from the beginning leaves balances unchanged |
 | `TestInvalidEventsGoToDLQ` | Malformed, invalid, overdraft, and currency-mismatch events land in the DLQ with the right reason, and valid events keep flowing |
 | `TestCreditsAreAcceptedIntoNegativeAccount` | Only debits can be refused for insufficient funds (a regression found by the chaos test) |
+| `TestWithdrawalRecordsSettlementWithItsDebit` | A settlement commits with its debit; rejected withdrawals and redeliveries don't create one |
+| `TestBatchDecidesEventsInOrder` | Inside one batch, each event sees the effect of those before it, and a rejection doesn't affect the rest |
+| `TestPoisonEventDoesNotFailItsBatch` | When the database refuses a batch because of one event, only that event goes to the DLQ |
+| `TestRejectedEventDoesNotSetNewAccountCurrency` | A rejected event can't decide a new account's currency |
+| `TestBalanceOverflowIsRejected` | A credit that would overflow a balance goes to the DLQ |
 | `TestGracefulShutdownCommitsOffsets` | After a clean stop, a restarted processor doesn't see already-handled events |
 
 Breaking deduplication on purpose makes the duplicate, crash, and replay tests fail, so they do catch the bugs they're meant to catch.

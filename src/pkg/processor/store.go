@@ -94,6 +94,13 @@ INSERT INTO accounts (account_id, currency, balance_minor, last_event_id, last_e
 SELECT * FROM unnest($1::text[], $2::text[], $3::bigint[], $4::text[], $5::timestamptz[])
 ON CONFLICT (account_id) DO NOTHING`
 
+// A withdrawal's settlement is recorded with its debit, in one transaction, so
+// neither can exist without the other. See migrations/000003_settlements.up.sql.
+const insertSettlements = `
+INSERT INTO settlements (event_id, account_id, amount_minor, currency)
+SELECT * FROM unnest($1::text[], $2::text[], $3::bigint[], $4::text[])
+ON CONFLICT (event_id) DO NOTHING`
+
 // account is an account's state while a batch is being applied in memory.
 type account struct {
 	balance   int64
@@ -259,6 +266,19 @@ func writeBatch(ctx context.Context, dbtx pgx.Tx, items []BatchItem, results []I
 		return nil
 	}
 
+	var st struct {
+		ids, accounts, currencies []string
+		amounts                   []int64
+	}
+	for i, it := range items {
+		if results[i].Applied && it.Tx.Type == fintechv1.TransactionType_TRANSACTION_TYPE_WITHDRAWAL {
+			st.ids = append(st.ids, it.Tx.EventId)
+			st.accounts = append(st.accounts, it.Tx.AccountId)
+			st.amounts = append(st.amounts, it.Tx.AmountMinor)
+			st.currencies = append(st.currencies, it.Tx.Currency)
+		}
+	}
+
 	var upd, ins struct {
 		ids, currencies, lastEvents []string
 		balances                    []int64
@@ -283,6 +303,7 @@ func writeBatch(ctx context.Context, dbtx pgx.Tx, items []BatchItem, results []I
 	batch.Queue(insertEvents, ev.ids, ev.accounts, ev.types, ev.amounts, ev.currencies, ev.createdAt, ev.partitions, ev.offsets)
 	batch.Queue(updateBalances, upd.ids, upd.balances, upd.lastEvents, upd.lastAts)
 	batch.Queue(createAccounts, ins.ids, ins.currencies, ins.balances, ins.lastEvents, ins.lastAts)
+	batch.Queue(insertSettlements, st.ids, st.accounts, st.amounts, st.currencies)
 	sent := dbtx.SendBatch(ctx, batch)
 	defer func() { _ = sent.Close() }()
 
@@ -304,6 +325,9 @@ func writeBatch(ctx context.Context, dbtx pgx.Tx, items []BatchItem, results []I
 	}
 	if tag.RowsAffected() != int64(len(ins.ids)) {
 		return errors.New("accounts created concurrently")
+	}
+	if _, err := sent.Exec(); err != nil {
+		return fmt.Errorf("record settlements: %w", err)
 	}
 	return nil
 }

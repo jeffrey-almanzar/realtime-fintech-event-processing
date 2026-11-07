@@ -115,6 +115,21 @@ That's no change at the median and roughly 1.5–2× on p99, from only two pairs
 
 **A misleading comparison, caught.** One `NOTIFY`-off run looked much worse than `NOTIFY` on (p99 1.6 s). It ran right after a 32,000/s test, while Postgres was still catching up. Later runs wait for autovacuum to finish, and comparisons alternate.
 
+## Settlements and the hot path
+
+Withdrawals settle through Temporal, but the Processor never calls it: it writes a row to an outbox table in the same transaction as the debit, and a separate worker starts the workflows. To test that isolation, runs alternated between deposits only and a mix where 1 in 6 events is a withdrawal, at 5,000/s with the worker running.
+
+| Run | Events | p50 | p99 | Kept up? |
+| --- | --- | --- | --- | --- |
+| 1 | Deposits only, no backlog yet | 8 ms | 1.2 s | Yes |
+| 2 | With withdrawals | 26 ms | 1.3 s | Yes |
+| 3 | Deposits only, backlog still being worked through | 19 ms | 0.9 s | Yes |
+| 4 | With withdrawals | 20 ms | 0.6 s | Yes |
+
+- **Throughput is isolated.** The pipeline held 5,000/s with lag draining within 2 s, while 81,000 settlements waited in the outbox.
+- **Latency isn't, on one laptop.** p50 rose from about 8 ms to about 20 ms. Deposits-only run 3 slowed as much as the withdrawal runs, which suggests Temporal and the worker competing for the machine rather than the outbox write itself. These runs can't fully separate the two, and p99 is too noisy here to compare.
+- **Settlement throughput is far lower than event throughput:** about 30 settlements/s on the single-process Temporal dev server. That's expected for that server and for a mock provider with a 500 ms delay, and it wasn't tuned. A sustained 830 withdrawals/s just grows the backlog, which is what the outbox is there to absorb.
+
 ## Saturation
 
 | Rate | Result |

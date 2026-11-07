@@ -207,6 +207,24 @@ func TestStreamDoesNotLeakOtherAccounts(t *testing.T) {
 	}
 }
 
+func TestTransactionsIncludeSettlementStatus(t *testing.T) {
+	ts := startServer(t)
+	id, eventID := "acct-"+uuid.NewString()[:8], uuid.NewString()
+	exec(t, `INSERT INTO processed_events
+		(event_id, account_id, type, amount_minor, currency, created_at, kafka_partition, kafka_offset)
+		VALUES ($1, $2, 'TRANSACTION_TYPE_WITHDRAWAL', 100, 'USD', now(), 0, 0)`, eventID, id)
+	exec(t, `INSERT INTO settlements (event_id, account_id, amount_minor, currency, status)
+		VALUES ($1, $2, 100, 'USD', 'reversed')`, eventID, id)
+
+	var p struct {
+		Transactions []Transaction `json:"transactions"`
+	}
+	getJSON(t, ts.URL+"/accounts/"+id+"/transactions", &p)
+	if len(p.Transactions) != 1 || p.Transactions[0].Settlement == nil || *p.Transactions[0].Settlement != "reversed" {
+		t.Errorf("transactions = %+v, want one with settlement reversed", p.Transactions)
+	}
+}
+
 func getJSON(t *testing.T, url string, into any) int {
 	t.Helper()
 	resp, err := http.Get(url)

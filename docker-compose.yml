@@ -92,6 +92,14 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Single-process development server, with its web UI on port 8233.
+  temporal:
+    image: temporalio/temporal:1.8.3
+    command: ["server", "start-dev", "--ip", "0.0.0.0"]
+    ports:
+      - "7233:7233" # gRPC
+      - "8233:8233" # Web UI
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.160.0
     command: ["--config=/etc/otelcol/config.yaml"]

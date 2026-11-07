@@ -30,6 +30,9 @@ const (
 	TransactionType_TRANSACTION_TYPE_WITHDRAWAL   TransactionType = 2
 	TransactionType_TRANSACTION_TYPE_TRANSFER_IN  TransactionType = 3
 	TransactionType_TRANSACTION_TYPE_TRANSFER_OUT TransactionType = 4
+	// Issued by the settlement workflow when a withdrawal can't be completed.
+	// Not accepted from the public API.
+	TransactionType_TRANSACTION_TYPE_REFUND TransactionType = 5
 )
 
 // Enum value maps for TransactionType.
@@ -40,6 +43,7 @@ var (
 		2: "TRANSACTION_TYPE_WITHDRAWAL",
 		3: "TRANSACTION_TYPE_TRANSFER_IN",
 		4: "TRANSACTION_TYPE_TRANSFER_OUT",
+		5: "TRANSACTION_TYPE_REFUND",
 	}
 	TransactionType_value = map[string]int32{
 		"TRANSACTION_TYPE_UNSPECIFIED":  0,
@@ -47,6 +51,7 @@ var (
 		"TRANSACTION_TYPE_WITHDRAWAL":   2,
 		"TRANSACTION_TYPE_TRANSFER_IN":  3,
 		"TRANSACTION_TYPE_TRANSFER_OUT": 4,
+		"TRANSACTION_TYPE_REFUND":       5,
 	}
 )
 
@@ -182,13 +187,14 @@ const file_fintech_v1_transaction_proto_rawDesc = "" +
 	"\famount_minor\x18\x04 \x01(\x03R\vamountMinor\x12\x1a\n" +
 	"\bcurrency\x18\x05 \x01(\tR\bcurrency\x129\n" +
 	"\n" +
-	"created_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt*\xb7\x01\n" +
+	"created_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt*\xd4\x01\n" +
 	"\x0fTransactionType\x12 \n" +
 	"\x1cTRANSACTION_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18TRANSACTION_TYPE_DEPOSIT\x10\x01\x12\x1f\n" +
 	"\x1bTRANSACTION_TYPE_WITHDRAWAL\x10\x02\x12 \n" +
 	"\x1cTRANSACTION_TYPE_TRANSFER_IN\x10\x03\x12!\n" +
-	"\x1dTRANSACTION_TYPE_TRANSFER_OUT\x10\x04B\\ZZgithub.com/jeffrey-almanzar/realtime-fintech-event-processing/src/gen/fintech/v1;fintechv1b\x06proto3"
+	"\x1dTRANSACTION_TYPE_TRANSFER_OUT\x10\x04\x12\x1b\n" +
+	"\x17TRANSACTION_TYPE_REFUND\x10\x05B\\ZZgithub.com/jeffrey-almanzar/realtime-fintech-event-processing/src/gen/fintech/v1;fintechv1b\x06proto3"
 
 var (
 	file_fintech_v1_transaction_proto_rawDescOnce sync.Once

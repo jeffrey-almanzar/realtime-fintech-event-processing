@@ -92,6 +92,8 @@
     Clicking a button sends a transaction to the Event API → Kafka → Processor → Postgres. The new balance comes back
     over Server-Sent Events from Postgres <code>NOTIFY</code>. Rejected events (e.g. overdrafts) never change the
     balance; see them with <code>make dlq</code>.
+    Withdrawals then settle through a Temporal workflow: try an amount ending in <code>.13</code> to watch the mock
+    provider decline it and the workflow refund it automatically.
   </p>
 </main>
 
@@ -103,6 +105,7 @@ let account = $("account").value;
 let source = null;
 let current = null;           // last balance shown
 const pending = new Map();    // event_id -> { start, timer }
+let historyTimer = null;
 
 function digits(currency) {
   try { return new Intl.NumberFormat(undefined, { style: "currency", currency }).resolvedOptions().maximumFractionDigits; }
@@ -165,12 +168,18 @@ async function loadHistory(highlight) {
     body.innerHTML = '<tr><td colspan="4" class="empty">No transactions yet.</td></tr>';
     return;
   }
+  // A settlement finishing doesn't always change the balance, so there may be
+  // no update to wait for: check again while any is still in progress.
+  clearTimeout(historyTimer);
+  if (transactions.some((t) => t.settlement === "pending" || t.settlement === "started")) {
+    historyTimer = setTimeout(loadHistory, 1000);
+  }
   for (const t of transactions) {
     const tr = document.createElement("tr");
     if (t.event_id === highlight) tr.className = "new";
     const cells = [
       new Date(t.created_at).toLocaleTimeString(),
-      t.type.replace("_", " "),
+      t.type.replace("_", " ") + (t.settlement ? ` (${t.settlement})` : ""),
       t.event_id.slice(0, 8),
       (t.amount_minor > 0 ? "+" : "") + money(t.amount_minor, t.currency),
     ];

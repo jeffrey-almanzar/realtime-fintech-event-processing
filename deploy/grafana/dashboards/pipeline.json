@@ -304,6 +304,34 @@
           "expr": "sum(processor_queued)"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Settlements completed, by outcome",
+      "description": "Withdrawals finished by the settlement workflow. reversed: refunded after the provider declined or was unavailable.",
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{status}}",
+          "expr": "sum by (status) (rate(settlements_completed_total[1m]))"
+        }
+      ]
     }
   ]
 }

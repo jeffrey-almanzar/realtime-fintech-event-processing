@@ -28,4 +28,7 @@ enum TransactionType {
   TRANSACTION_TYPE_WITHDRAWAL = 2;
   TRANSACTION_TYPE_TRANSFER_IN = 3;
   TRANSACTION_TYPE_TRANSFER_OUT = 4;
+  // Issued by the settlement workflow when a withdrawal can't be completed.
+  // Not accepted from the public API.
+  TRANSACTION_TYPE_REFUND = 5;
 }

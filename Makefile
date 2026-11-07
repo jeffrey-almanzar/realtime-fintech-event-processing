@@ -1,7 +1,7 @@
-.PHONY: up down logs build test test-integration lint proto migrate run-api run-processor run-query loadgen dlq dlq-replay
+.PHONY: up down logs build test test-integration lint proto migrate run-api run-processor run-query run-worker loadgen dlq dlq-replay
 
 up: ## Start the local stack, create topics, and run migrations
-	docker compose up -d --wait kafka postgres kafka-ui otel-collector jaeger prometheus grafana
+	docker compose up -d --wait kafka postgres kafka-ui otel-collector jaeger prometheus grafana temporal
 	docker compose run --rm kafka-init
 	docker compose run --rm migrate
 
@@ -39,6 +39,9 @@ run-processor:
 
 run-query: ## Query API + live stream + demo page at http://localhost:8082
 	go run ./src/cmd/query
+
+run-worker: ## Settlement workflows (Temporal worker + outbox relay)
+	go run ./src/cmd/worker
 
 loadgen: ## e.g. make loadgen ARGS="-rate 200 -duration 60s"
 	go run ./src/cmd/loadgen $(ARGS)

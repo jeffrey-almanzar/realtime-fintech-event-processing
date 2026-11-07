@@ -505,6 +505,38 @@ func TestBatchDecidesEventsInOrder(t *testing.T) {
 	}
 }
 
+// A withdrawal's settlement commits with its debit. A rejected withdrawal must
+// not create one, and redelivery must not create a second.
+func TestWithdrawalRecordsSettlementWithItsDebit(t *testing.T) {
+	e := newEnv(t)
+	applied := e.tx("s", withdrawal, 30)
+	rejected := e.tx("s", withdrawal, 5000)
+	e.publish(e.tx("s", deposit, 100), applied, applied, rejected)
+
+	stop := e.start(e.config())
+	eventually(t, "withdrawal applied", func() bool { b, _ := e.balance("s"); return b == 70 })
+	e.dlqMessages(1)
+	if err := stop(); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+
+	var n int
+	var status string
+	err := db.QueryRow(context.Background(),
+		"SELECT count(*), min(status) FROM settlements WHERE account_id = $1", e.prefix+"s").Scan(&n, &status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || status != "pending" {
+		t.Errorf("settlements = %d with status %q, want 1 pending", n, status)
+	}
+	var id string
+	if err := db.QueryRow(context.Background(),
+		"SELECT event_id FROM settlements WHERE account_id = $1", e.prefix+"s").Scan(&id); err != nil || id != applied.EventId {
+		t.Errorf("settlement event = %q (%v), want %q", id, err, applied.EventId)
+	}
+}
+
 // Regression: a new account took its currency from the first event in the
 // batch even when that event was rejected, so the next event was refused.
 func TestRejectedEventDoesNotSetNewAccountCurrency(t *testing.T) {

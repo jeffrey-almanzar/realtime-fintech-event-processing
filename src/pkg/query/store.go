@@ -35,6 +35,8 @@ type Transaction struct {
 	Currency    string    `json:"currency"`
 	CreatedAt   time.Time `json:"created_at"`
 	ProcessedAt time.Time `json:"processed_at"`
+	// Settlement is a withdrawal's status: pending, started, settled, or reversed.
+	Settlement *string `json:"settlement,omitempty"`
 }
 
 // ErrNotFound means the account has never had an applied event.
@@ -82,11 +84,12 @@ func (s *Store) Account(ctx context.Context, id string) (Account, error) {
 // Newest first. Keyset pagination on (created_at, event_id) stays fast however
 // deep the client pages, unlike OFFSET.
 const selectTransactions = `
-SELECT event_id, type, amount_minor, currency, created_at, processed_at
-FROM processed_events
-WHERE account_id = $1
-  AND ($2::timestamptz IS NULL OR (created_at, event_id) < ($2, $3))
-ORDER BY created_at DESC, event_id DESC
+SELECT e.event_id, e.type, e.amount_minor, e.currency, e.created_at, e.processed_at, s.status
+FROM processed_events e
+LEFT JOIN settlements s USING (event_id)
+WHERE e.account_id = $1
+  AND ($2::timestamptz IS NULL OR (e.created_at, e.event_id) < ($2, $3))
+ORDER BY e.created_at DESC, e.event_id DESC
 LIMIT $4`
 
 // Transactions returns up to limit applied events older than cursor (or the
@@ -110,7 +113,7 @@ func (s *Store) Transactions(ctx context.Context, accountID, cursor string, limi
 	}
 	txs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Transaction, error) {
 		var t Transaction
-		err := row.Scan(&t.EventID, &t.Type, &t.AmountMinor, &t.Currency, &t.CreatedAt, &t.ProcessedAt)
+		err := row.Scan(&t.EventID, &t.Type, &t.AmountMinor, &t.Currency, &t.CreatedAt, &t.ProcessedAt, &t.Settlement)
 		t.Currency = strings.TrimSpace(t.Currency)
 		t.Type, t.AmountMinor = presentType(t.Type, t.AmountMinor)
 		return t, err

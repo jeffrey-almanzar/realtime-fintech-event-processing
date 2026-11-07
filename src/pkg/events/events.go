@@ -44,7 +44,8 @@ func Validate(tx *fintechv1.Transaction) error {
 func SignedAmount(tx *fintechv1.Transaction) (int64, error) {
 	switch tx.Type {
 	case fintechv1.TransactionType_TRANSACTION_TYPE_DEPOSIT,
-		fintechv1.TransactionType_TRANSACTION_TYPE_TRANSFER_IN:
+		fintechv1.TransactionType_TRANSACTION_TYPE_TRANSFER_IN,
+		fintechv1.TransactionType_TRANSACTION_TYPE_REFUND:
 		return tx.AmountMinor, nil
 	case fintechv1.TransactionType_TRANSACTION_TYPE_WITHDRAWAL,
 		fintechv1.TransactionType_TRANSACTION_TYPE_TRANSFER_OUT:
