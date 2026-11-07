@@ -32,126 +32,261 @@ const (
 	HeaderDLQFailedAt        = "dlq.failed_at"
 )
 
-// outcome describes how an event was handled.
+// outcome describes how one message was handled.
 type outcome struct {
-	result string // "applied", "duplicate", or "dead_lettered"
-	reason string // why it was dead-lettered
+	result    string // "applied", "duplicate", or "dead_lettered"
+	reason    string // why it was dead-lettered
+	cause     error
+	createdAt time.Time
+	published bool // already acknowledged by the DLQ topic
 }
 
-// handle processes one message end to end and stores its offset. A non-nil
-// error means the processor must stop.
-func (p *Processor) handle(ctx context.Context, msg *kafka.Message) error {
-	// Continue the trace started by the Event API.
-	traceCtx := otel.GetTextMapPropagator().Extract(ctx, telemetry.HeaderCarrier{Headers: &msg.Headers})
-	traceCtx, span := p.tracer.Start(traceCtx, *msg.TopicPartition.Topic+" process",
-		trace.WithSpanKind(trace.SpanKindConsumer),
-		trace.WithAttributes(
-			attribute.String("messaging.system", "kafka"),
-			attribute.String("messaging.destination.name", *msg.TopicPartition.Topic),
-			attribute.Int("messaging.destination.partition.id", int(msg.TopicPartition.Partition)),
-			attribute.Int64("messaging.kafka.offset", int64(msg.TopicPartition.Offset)),
-		))
-	defer span.End()
+func (o *outcome) deadLetter(reason string, cause error) {
+	o.result, o.reason, o.cause = "dead_lettered", reason, cause
+}
 
-	out, err := p.process(traceCtx, ctx, msg)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return err
-	}
-
-	attrs := []attribute.KeyValue{attribute.String("result", out.result)}
-	if out.reason != "" {
-		attrs = append(attrs, attribute.String("reason", out.reason))
-	}
-	span.SetAttributes(attrs...)
-	p.metrics.processed.Add(traceCtx, 1, metric.WithAttributes(attrs...))
-
-	if p.cfg.AfterHandle != nil {
-		if err := p.cfg.AfterHandle(msg); err != nil {
-			return err
+// handleBatch processes messages from one partition, in order, and stores the
+// offset of the last one handled. A non-nil error means the processor must stop.
+func (p *Processor) handleBatch(ctx context.Context, msgs []*kafka.Message) error {
+	started := time.Now()
+	// Each event continues the trace started by the Event API. The database
+	// work is shared, so it hangs off the first event's trace and the batch
+	// span links to the others.
+	topic := *msgs[0].TopicPartition.Topic
+	spans := make([]trace.Span, len(msgs))
+	links := make([]trace.Link, len(msgs))
+	var firstCtx context.Context
+	for i, msg := range msgs {
+		eventCtx := otel.GetTextMapPropagator().Extract(ctx, telemetry.HeaderCarrier{Headers: &msg.Headers})
+		eventCtx, spans[i] = p.tracer.Start(eventCtx, topic+" process",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "kafka"),
+				attribute.String("messaging.destination.name", topic),
+				attribute.Int("messaging.destination.partition.id", int(msg.TopicPartition.Partition)),
+				attribute.Int64("messaging.kafka.offset", int64(msg.TopicPartition.Offset)),
+			))
+		links[i] = trace.LinkFromContext(eventCtx)
+		if i == 0 {
+			firstCtx = eventCtx
 		}
 	}
-	if _, err := p.consumer.StoreMessage(msg); err != nil {
-		return fmt.Errorf("store offset: %w", err)
+	batchCtx, batchSpan := p.tracer.Start(firstCtx, topic+" apply batch",
+		trace.WithLinks(links[1:]...),
+		trace.WithAttributes(attribute.Int("messaging.batch.message_count", len(msgs))))
+	defer func() {
+		batchSpan.End()
+		for _, s := range spans {
+			s.End()
+		}
+	}()
+	p.metrics.batchSize.Record(ctx, int64(len(msgs)))
+	p.buffered.Add(-int64(len(msgs)))
+
+	outs, err := p.process(batchCtx, ctx, msgs)
+	if err != nil {
+		batchSpan.RecordError(err)
+		batchSpan.SetStatus(codes.Error, err.Error())
+		return err
 	}
-	return nil
+
+	p.record(ctx, msgs, outs, spans, started)
+
+	// Stop at the first injected failure, as a crash would: offsets of events
+	// handled but not yet stored are redelivered and deduplicated.
+	last := -1
+	var hookErr error
+	if p.cfg.AfterHandle != nil {
+		for i, msg := range msgs {
+			if hookErr = p.cfg.AfterHandle(msg); hookErr != nil {
+				break
+			}
+			last = i
+		}
+	} else {
+		last = len(msgs) - 1
+	}
+	if last >= 0 {
+		if _, err := p.consumer.StoreMessage(msgs[last]); err != nil {
+			return fmt.Errorf("store offset: %w", err)
+		}
+	}
+	return hookErr
 }
 
-// process applies the event or dead-letters it. Database work runs on a
-// context that ignores shutdown, so an in-flight transaction always finishes;
-// runCtx only interrupts retry backoff.
-func (p *Processor) process(traceCtx, runCtx context.Context, msg *kafka.Message) (outcome, error) {
+func (p *Processor) record(ctx context.Context, msgs []*kafka.Message, outs []outcome, spans []trace.Span, started time.Time) {
+	now := time.Now()
+	stage := func(name string, d time.Duration) {
+		p.metrics.stage.Record(ctx, float64(d)/float64(time.Millisecond),
+			metric.WithAttributeSet(attribute.NewSet(attribute.String("stage", name))))
+	}
+	counts := map[[2]string]int64{}
+	for i := range outs {
+		o := &outs[i]
+		counts[[2]string{o.result, o.reason}]++
+		spans[i].SetAttributes(attribute.String("result", o.result))
+		if o.reason != "" {
+			spans[i].SetAttributes(attribute.String("reason", o.reason))
+		}
+		if o.result == "applied" {
+			p.metrics.latency.Record(ctx, float64(now.Sub(o.createdAt))/float64(time.Millisecond))
+			if fetched, ok := msgs[i].Opaque.(time.Time); ok {
+				stage("kafka", fetched.Sub(o.createdAt))
+				stage("queue", started.Sub(fetched))
+				stage("apply", now.Sub(started))
+			}
+		}
+	}
+	for key, n := range counts {
+		attrs := []attribute.KeyValue{attribute.String("result", key[0])}
+		if key[1] != "" {
+			attrs = append(attrs, attribute.String("reason", key[1]))
+		}
+		p.metrics.processed.Add(ctx, n, metric.WithAttributes(attrs...))
+	}
+}
+
+// process decides every message and returns once the results are durable.
+// Database work runs on a context that ignores shutdown, so an in-flight
+// transaction always finishes; runCtx only interrupts retry backoff.
+func (p *Processor) process(traceCtx, runCtx context.Context, msgs []*kafka.Message) ([]outcome, error) {
 	workCtx := context.WithoutCancel(traceCtx)
+	outs := make([]outcome, len(msgs))
+	items := make([]BatchItem, 0, len(msgs))
+	indexes := make([]int, 0, len(msgs)) // items[i] came from msgs[indexes[i]]
 
-	var tx fintechv1.Transaction
-	if err := proto.Unmarshal(msg.Value, &tx); err != nil {
-		return p.deadLetter(workCtx, runCtx, msg, "malformed", err)
+	for i, msg := range msgs {
+		var tx fintechv1.Transaction
+		if err := proto.Unmarshal(msg.Value, &tx); err != nil {
+			outs[i].deadLetter("malformed", err)
+			continue
+		}
+		if err := events.Validate(&tx); err != nil {
+			outs[i].deadLetter("invalid", err)
+			continue
+		}
+		delta, _ := events.SignedAmount(&tx) // checked by Validate
+		outs[i].createdAt = tx.CreatedAt.AsTime()
+		items = append(items, BatchItem{
+			Tx: &tx, Delta: delta,
+			Partition: msg.TopicPartition.Partition,
+			Offset:    int64(msg.TopicPartition.Offset),
+		})
+		indexes = append(indexes, i)
 	}
-	if err := events.Validate(&tx); err != nil {
-		return p.deadLetter(workCtx, runCtx, msg, "invalid", err)
-	}
-	delta, _ := events.SignedAmount(&tx) // checked by Validate
 
-	var applied bool
-	err := p.retry(workCtx, runCtx, "apply", func() error {
-		var err error
-		applied, err = p.store.Apply(workCtx, &tx, delta, msg.TopicPartition.Partition, int64(msg.TopicPartition.Offset))
+	err := p.applyItems(workCtx, runCtx, msgs, outs, items, indexes)
+	if err == nil {
+		return outs, nil
+	}
+	if !isPermanent(err) {
+		return nil, err
+	}
+
+	// One event's contents made the database refuse the whole batch. Apply
+	// them one at a time so only that event goes to the DLQ.
+	for i := range items {
+		single, index := items[i:i+1], indexes[i:i+1]
+		if outs[index[0]].published {
+			continue
+		}
+		err := p.applyItems(workCtx, runCtx, msgs, outs, single, index)
+		if err == nil {
+			continue
+		}
+		if !isPermanent(err) {
+			return nil, err
+		}
+		outs[index[0]].deadLetter("invalid", err)
+		if err := p.publishDeadLetters(workCtx, runCtx, msgs, outs); err != nil {
+			return nil, err
+		}
+	}
+	return outs, nil
+}
+
+// applyItems applies items (retrying transient errors) and publishes every
+// pending dead letter before the transaction commits.
+func (p *Processor) applyItems(workCtx, runCtx context.Context, msgs []*kafka.Message, outs []outcome, items []BatchItem, indexes []int) error {
+	if len(items) == 0 {
+		return p.publishDeadLetters(workCtx, runCtx, msgs, outs)
+	}
+	return p.retry(workCtx, runCtx, "apply", func() error {
+		_, err := p.store.ApplyBatch(workCtx, items, func(results []ItemResult) error {
+			for i, r := range results {
+				o := &outs[indexes[i]]
+				switch {
+				case r.Rejection != nil:
+					o.deadLetter(r.Rejection.Reason, r.Rejection)
+				case r.Applied:
+					o.result = "applied"
+				default:
+					o.result = "duplicate"
+				}
+			}
+			return p.sendDeadLetters(msgs, outs)
+		})
 		return err
 	})
-	var rej *Rejection
-	switch {
-	case errors.As(err, &rej):
-		return p.deadLetter(workCtx, runCtx, msg, rej.Reason, rej)
-	case err != nil && isPermanent(err):
-		return p.deadLetter(workCtx, runCtx, msg, "invalid", err)
-	case err != nil:
-		return outcome{}, fmt.Errorf("apply event %s: %w", tx.EventId, err)
-	case !applied:
-		return outcome{result: "duplicate"}, nil
-	}
-
-	elapsed := float64(time.Since(tx.CreatedAt.AsTime())) / float64(time.Millisecond)
-	p.metrics.latency.Record(workCtx, elapsed)
-	return outcome{result: "applied"}, nil
 }
 
-// deadLetter publishes msg to the DLQ topic and waits for the broker to
-// acknowledge it, so the original offset can be stored safely.
-func (p *Processor) deadLetter(workCtx, runCtx context.Context, msg *kafka.Message, reason string, cause error) (outcome, error) {
-	log.Printf("Dead-lettering %s (%s): %v", msg.TopicPartition, reason, cause)
+func (p *Processor) publishDeadLetters(workCtx, runCtx context.Context, msgs []*kafka.Message, outs []outcome) error {
+	return p.retry(workCtx, runCtx, "dead-letter", func() error {
+		return p.sendDeadLetters(msgs, outs)
+	})
+}
 
-	headers := append([]kafka.Header{}, msg.Headers...)
-	headers = append(headers,
-		kafka.Header{Key: HeaderDLQReason, Value: []byte(reason)},
-		kafka.Header{Key: HeaderDLQError, Value: []byte(cause.Error())},
-		kafka.Header{Key: HeaderDLQSourceTopic, Value: []byte(*msg.TopicPartition.Topic)},
-		kafka.Header{Key: HeaderDLQSourcePartition, Value: []byte(strconv.Itoa(int(msg.TopicPartition.Partition)))},
-		kafka.Header{Key: HeaderDLQSourceOffset, Value: []byte(strconv.FormatInt(int64(msg.TopicPartition.Offset), 10))},
-		kafka.Header{Key: HeaderDLQFailedAt, Value: []byte(time.Now().UTC().Format(time.RFC3339Nano))},
-	)
+// sendDeadLetters publishes every unpublished dead letter and waits for the
+// broker to acknowledge them. Across a retry only the ones still unacknowledged
+// are sent again, though a crash can still repeat one; replays deduplicate.
+func (p *Processor) sendDeadLetters(msgs []*kafka.Message, outs []outcome) error {
 	topic := p.cfg.Kafka.DLQTopic
+	delivery := make(chan kafka.Event, len(msgs))
+	inFlight := 0
 
-	err := p.retry(workCtx, runCtx, "dead-letter", func() error {
-		delivery := make(chan kafka.Event, 1)
-		err := p.producer.Produce(&kafka.Message{
+	for i := range outs {
+		o := &outs[i]
+		if o.reason == "" || o.published {
+			continue
+		}
+		msg := msgs[i]
+		log.Printf("Dead-lettering %s (%s): %v", msg.TopicPartition, o.reason, o.cause)
+		headers := append([]kafka.Header{}, msg.Headers...)
+		headers = append(headers,
+			kafka.Header{Key: HeaderDLQReason, Value: []byte(o.reason)},
+			kafka.Header{Key: HeaderDLQError, Value: []byte(o.cause.Error())},
+			kafka.Header{Key: HeaderDLQSourceTopic, Value: []byte(*msg.TopicPartition.Topic)},
+			kafka.Header{Key: HeaderDLQSourcePartition, Value: []byte(strconv.Itoa(int(msg.TopicPartition.Partition)))},
+			kafka.Header{Key: HeaderDLQSourceOffset, Value: []byte(strconv.FormatInt(int64(msg.TopicPartition.Offset), 10))},
+			kafka.Header{Key: HeaderDLQFailedAt, Value: []byte(time.Now().UTC().Format(time.RFC3339Nano))},
+		)
+		dead := &kafka.Message{
 			TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 			Key:            msg.Key,
 			Value:          msg.Value,
 			Headers:        headers,
-		}, delivery)
-		if err != nil {
-			return err
+			Opaque:         i,
 		}
-		if m := (<-delivery).(*kafka.Message); m.TopicPartition.Error != nil {
-			return m.TopicPartition.Error
+		if err := p.producer.Produce(dead, delivery); err != nil {
+			// Still collect what's in flight, so those aren't sent twice.
+			return errors.Join(err, awaitDeliveries(delivery, inFlight, outs))
 		}
-		return nil
-	})
-	if err != nil {
-		return outcome{}, fmt.Errorf("dead-letter %s: %w", msg.TopicPartition, err)
+		inFlight++
 	}
-	return outcome{result: "dead_lettered", reason: reason}, nil
+	return awaitDeliveries(delivery, inFlight, outs)
+}
+
+func awaitDeliveries(delivery <-chan kafka.Event, n int, outs []outcome) error {
+	var errs []error
+	for range n {
+		m := (<-delivery).(*kafka.Message)
+		if m.TopicPartition.Error != nil {
+			errs = append(errs, m.TopicPartition.Error)
+			continue
+		}
+		outs[m.Opaque.(int)].published = true
+	}
+	return errors.Join(errs...)
 }
 
 // retry runs op until it succeeds, fails permanently, or runs out of

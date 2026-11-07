@@ -38,12 +38,14 @@ func main() {
 	}
 	defer flush(shutdownTelemetry)
 
+	telemetry.StartPprof()
+
 	cfg := config.LoadKafka()
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers":  cfg.BootstrapServers,
 		"enable.idempotence": true,
 		"acks":               "all",
-		"linger.ms":          5,
+		"linger.ms":          1, // measured: 5 ms nearly doubled median end-to-end latency
 	})
 	if err != nil {
 		log.Fatalf("Failed to create producer: %v", err)

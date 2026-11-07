@@ -145,6 +145,7 @@ func (e *env) config() Config {
 		DatabaseURL:     dbURL,
 		Retry:           RetryPolicy{MaxAttempts: 3, InitialBackoff: 10 * time.Millisecond, MaxBackoff: 50 * time.Millisecond},
 		PartitionBuffer: 100,
+		MaxBatch:        50,
 		// Faster group joins and rebalances for tests.
 		ConsumerOverrides: kafka.ConfigMap{"session.timeout.ms": 6000, "heartbeat.interval.ms": 500},
 	}
@@ -475,6 +476,99 @@ func TestCreditsAreAcceptedIntoNegativeAccount(t *testing.T) {
 	}
 	if len(msgs) != 1 || header(msgs[0], HeaderDLQReason) != "insufficient_funds" {
 		t.Errorf("want only the withdrawal dead-lettered as insufficient_funds, got %d messages", len(msgs))
+	}
+}
+
+// Batches form when events are already waiting, as they are here: everything
+// is published before the processor starts. A rejected event must not affect
+// the rest of its batch, and later events must see earlier ones' effects.
+func TestBatchDecidesEventsInOrder(t *testing.T) {
+	e := newEnv(t)
+	e.publish(
+		e.tx("a", deposit, 100),
+		e.tx("a", withdrawal, 500), // rejected
+		e.tx("a", withdrawal, 60),  // allowed only after the deposit
+		e.tx("a", deposit, 10),
+	)
+
+	stop := e.start(e.config())
+	eventually(t, "batch applied", func() bool { b, _ := e.balance("a"); return b == 50 })
+	msgs := e.dlqMessages(1)
+	if err := stop(); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	if len(msgs) != 1 || header(msgs[0], HeaderDLQReason) != "insufficient_funds" {
+		t.Errorf("want one insufficient_funds in the DLQ, got %d messages", len(msgs))
+	}
+	if n := e.processedCount(); n != 3 {
+		t.Errorf("processed_events = %d, want 3", n)
+	}
+}
+
+// Regression: a new account took its currency from the first event in the
+// batch even when that event was rejected, so the next event was refused.
+func TestRejectedEventDoesNotSetNewAccountCurrency(t *testing.T) {
+	e := newEnv(t)
+	rejected := e.tx("new", withdrawal, 100)
+	rejected.Currency = "EUR"
+	e.publish(rejected, e.tx("new", deposit, 40))
+
+	stop := e.start(e.config())
+	eventually(t, "deposit applied", func() bool { b, _ := e.balance("new"); return b == 40 })
+	msgs := e.dlqMessages(1)
+	if err := stop(); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	if len(msgs) != 1 || header(msgs[0], HeaderDLQReason) != "insufficient_funds" {
+		t.Errorf("want only the withdrawal in the DLQ, got %d messages", len(msgs))
+	}
+}
+
+// Postgres refuses a NUL byte in text, which fails the whole batch's write.
+// Only the offending event may go to the DLQ.
+func TestPoisonEventDoesNotFailItsBatch(t *testing.T) {
+	e := newEnv(t)
+	poison := e.tx("poison", deposit, 1)
+	poison.AccountId = e.prefix + "a\x00b"
+	var txs []*fintechv1.Transaction
+	for i := range 10 {
+		txs = append(txs, e.tx(fmt.Sprint(i%3), deposit, 5))
+	}
+	txs = append(txs[:5:5], append([]*fintechv1.Transaction{poison}, txs[5:]...)...)
+	e.publish(txs...)
+
+	stop := e.start(e.config())
+	eventually(t, "valid events applied", func() bool { return e.processedCount() == 10 })
+	msgs := e.dlqMessages(1)
+	if err := stop(); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	if len(msgs) != 1 || header(msgs[0], HeaderDLQReason) != "invalid" {
+		t.Fatalf("want the poison event in the DLQ as invalid, got %d messages", len(msgs))
+	}
+	if got := e.totalBalance(); got != 50 {
+		t.Errorf("total balance = %d, want 50", got)
+	}
+}
+
+func TestBalanceOverflowIsRejected(t *testing.T) {
+	e := newEnv(t)
+	if _, err := db.Exec(context.Background(),
+		"INSERT INTO accounts (account_id, currency, balance_minor) VALUES ($1, 'USD', 9223372036854775000)", e.prefix+"big"); err != nil {
+		t.Fatal(err)
+	}
+	e.publish(e.tx("big", deposit, 1000))
+
+	stop := e.start(e.config())
+	msgs := e.dlqMessages(1)
+	if err := stop(); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	if len(msgs) != 1 || header(msgs[0], HeaderDLQReason) != "balance_overflow" {
+		t.Errorf("want balance_overflow in the DLQ, got %d messages", len(msgs))
+	}
+	if b, _ := e.balance("big"); b != 9223372036854775000 {
+		t.Errorf("balance changed to %d", b)
 	}
 }
 

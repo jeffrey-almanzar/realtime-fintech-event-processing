@@ -197,9 +197,17 @@ $("send").addEventListener("submit", async (e) => {
   const event_id = crypto.randomUUID();
   const start = performance.now();
   // Registered before sending so a very fast update isn't missed.
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     pending.delete(event_id);
-    setFeedback(`Not applied after 5 s. It was probably rejected (overdraft or currency mismatch); run "make dlq" to see why.`, "bad");
+    // An update names only the last event of its batch, so check the history
+    // before saying this one wasn't applied.
+    const res = await fetch(`/accounts/${encodeURIComponent(account)}/transactions?limit=100`);
+    const { transactions = [] } = res.ok ? await res.json() : {};
+    if (transactions.some((t) => t.event_id === event_id)) {
+      setFeedback("Applied together with other events in the same batch.", "good");
+    } else {
+      setFeedback(`Not applied after 5 s. It was probably rejected (overdraft or currency mismatch); run "make dlq" to see why.`, "bad");
+    }
   }, 5000);
   pending.set(event_id, { start, timer });
   setFeedback("Sending…");

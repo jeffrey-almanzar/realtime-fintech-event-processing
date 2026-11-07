@@ -56,6 +56,18 @@ services:
 
   postgres:
     image: postgres:17-alpine
+    # Tuned for write-heavy load (see docs/performance.md). Durability is
+    # unchanged: synchronous_commit stays on.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
     ports:
       - "5432:5432"
     environment:

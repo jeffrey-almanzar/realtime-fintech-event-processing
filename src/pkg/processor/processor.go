@@ -6,6 +6,11 @@
 // proceed in parallel. Offsets are stored only after an event is fully
 // handled (applied, deduplicated, or dead-lettered), so a crash causes a
 // reprocess, never a lost event.
+//
+// Under load a worker applies everything queued for its partition in one
+// database transaction, which removes most of the cost per event: round trips
+// and commits are per batch. Batches form only when events are waiting, so
+// light load keeps per-event latency.
 package processor
 
 import (
@@ -13,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -29,6 +35,8 @@ type Config struct {
 	Retry       RetryPolicy
 	// PartitionBuffer is how many fetched messages may queue per partition.
 	PartitionBuffer int
+	// MaxBatch caps how many events are applied in one database transaction.
+	MaxBatch int
 	// ConsumerOverrides are extra librdkafka settings (used by tests).
 	ConsumerOverrides kafka.ConfigMap
 	// AfterHandle, if set, runs after an event is handled and before its
@@ -50,7 +58,8 @@ func DefaultConfig() Config {
 		Kafka:           config.LoadKafka(),
 		DatabaseURL:     config.DatabaseURL(),
 		Retry:           RetryPolicy{MaxAttempts: 6, InitialBackoff: 100 * time.Millisecond, MaxBackoff: 5 * time.Second},
-		PartitionBuffer: 500,
+		PartitionBuffer: 2000,
+		MaxBatch:        config.ProcessorMaxBatch(),
 	}
 }
 
@@ -66,6 +75,7 @@ type Processor struct {
 	store    *Store
 	tracer   trace.Tracer
 	metrics  *instruments
+	buffered *atomic.Int64 // fetched from Kafka but not yet being processed
 
 	// Only touched from the polling goroutine (rebalance callbacks run
 	// inside Poll), so no lock is needed.
@@ -81,6 +91,9 @@ type worker struct {
 
 // New connects to Kafka and Postgres. Call Run to start processing.
 func New(ctx context.Context, cfg Config) (*Processor, error) {
+	if cfg.MaxBatch < 1 {
+		cfg.MaxBatch = 1
+	}
 	store, err := NewStore(ctx, cfg.DatabaseURL, 16)
 	if err != nil {
 		return nil, fmt.Errorf("connect to Postgres: %w", err)
@@ -121,7 +134,8 @@ func New(ctx context.Context, cfg Config) (*Processor, error) {
 		return nil, fmt.Errorf("create DLQ producer: %w", err)
 	}
 
-	metrics, err := newInstruments(consumer, cfg.Kafka.GroupID)
+	buffered := &atomic.Int64{}
+	metrics, err := newInstruments(consumer, cfg.Kafka.GroupID, buffered)
 	if err != nil {
 		producer.Close()
 		_ = consumer.Close()
@@ -136,6 +150,7 @@ func New(ctx context.Context, cfg Config) (*Processor, error) {
 		store:    store,
 		tracer:   otel.Tracer(instrumentationName),
 		metrics:  metrics,
+		buffered: buffered,
 		workers:  make(map[int32]*worker),
 		errs:     make(chan error, 1),
 	}, nil
@@ -185,6 +200,8 @@ func (p *Processor) Run(ctx context.Context) (err error) {
 				continue
 			}
 			// Blocks when the partition's buffer is full: natural backpressure.
+			e.Opaque = time.Now() // when it was fetched, for the per-stage latency metric
+			p.buffered.Add(1)
 			select {
 			case w.msgs <- e:
 			case err := <-p.errs:
@@ -235,6 +252,7 @@ func (p *Processor) startWorker(ctx context.Context, partition int32) {
 
 	go func() {
 		defer close(w.done)
+		batch := make([]*kafka.Message, 0, p.cfg.MaxBatch)
 		for {
 			// Check stop first so a full buffer doesn't delay shutdown.
 			select {
@@ -246,7 +264,7 @@ func (p *Processor) startWorker(ctx context.Context, partition int32) {
 			case <-w.stop:
 				return
 			case msg := <-w.msgs:
-				if err := p.handle(ctx, msg); err != nil {
+				if err := p.handleBatch(ctx, nextBatch(w.msgs, msg, batch[:0], p.cfg.MaxBatch)); err != nil {
 					if !errors.Is(err, errStopping) {
 						select {
 						case p.errs <- err:
@@ -260,6 +278,22 @@ func (p *Processor) startWorker(ctx context.Context, partition int32) {
 	}()
 }
 
+// nextBatch takes whatever is already queued, up to limit. It never waits, so
+// a lone event is processed immediately and batches only form under load, when
+// messages pile up during the previous batch's commit.
+func nextBatch(queue <-chan *kafka.Message, first *kafka.Message, batch []*kafka.Message, limit int) []*kafka.Message {
+	batch = append(batch, first)
+	for len(batch) < limit {
+		select {
+		case msg := <-queue:
+			batch = append(batch, msg)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
+
 // stopWorker waits for the partition's in-flight event, if any. Messages
 // still buffered are dropped; their offsets aren't stored, so they are
 // fetched again by whoever owns the partition next.
@@ -270,6 +304,7 @@ func (p *Processor) stopWorker(partition int32) {
 	}
 	close(w.stop)
 	<-w.done
+	p.buffered.Add(-int64(len(w.msgs)))
 	delete(p.workers, partition)
 }
 

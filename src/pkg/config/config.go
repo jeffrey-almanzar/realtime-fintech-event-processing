@@ -1,7 +1,10 @@
 // Package config loads service configuration from environment variables.
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 // Kafka holds the settings shared by producers and consumers.
 type Kafka struct {
@@ -31,6 +34,16 @@ func LoadKafka() Kafka {
 // DatabaseURL returns the Postgres connection string.
 func DatabaseURL() string {
 	return getEnv("DATABASE_URL", "postgres://fintech:fintech@localhost:5432/fintech?sslmode=disable")
+}
+
+// ProcessorMaxBatch caps how many events the Processor applies in one
+// database transaction.
+func ProcessorMaxBatch() int {
+	n, err := strconv.Atoi(getEnv("PROCESSOR_MAX_BATCH", "500"))
+	if err != nil || n < 1 {
+		return 500
+	}
+	return n
 }
 
 // HTTPAddr returns the address the Event API listens on.

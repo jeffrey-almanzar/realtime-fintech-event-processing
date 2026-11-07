@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"go.opentelemetry.io/otel"
@@ -15,11 +16,13 @@ type instruments struct {
 	processed metric.Int64Counter
 	retries   metric.Int64Counter
 	latency   metric.Float64Histogram
+	batchSize metric.Int64Histogram
+	stage     metric.Float64Histogram
 
 	lagRegistration metric.Registration
 }
 
-func newInstruments(consumer *kafka.Consumer, groupID string) (*instruments, error) {
+func newInstruments(consumer *kafka.Consumer, groupID string, buffered *atomic.Int64) (*instruments, error) {
 	meter := otel.Meter(instrumentationName)
 
 	processed, err := meter.Int64Counter("transactions.processed",
@@ -44,22 +47,47 @@ func newInstruments(consumer *kafka.Consumer, groupID string) (*instruments, err
 		return nil, err
 	}
 
+	stage, err := meter.Float64Histogram("transaction.stage.latency",
+		metric.WithDescription("Where end-to-end latency goes. kafka: created to fetched; queue: fetched to batch start; apply: batch start to committed"),
+		metric.WithUnit("ms"),
+		metric.WithExplicitBucketBoundaries(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000))
+	if err != nil {
+		return nil, err
+	}
+
+	batchSize, err := meter.Int64Histogram("processor.batch.size",
+		metric.WithDescription("Events applied per database transaction"),
+		metric.WithUnit("{event}"),
+		metric.WithExplicitBucketBoundaries(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000))
+	if err != nil {
+		return nil, err
+	}
+
 	lag, err := meter.Int64ObservableGauge("kafka.consumer.lag",
 		metric.WithDescription("Messages between the consumer position and the end of each assigned partition"),
 		metric.WithUnit("{message}"))
 	if err != nil {
 		return nil, err
 	}
+	// Consumer lag only counts what hasn't been fetched. Events fetched but
+	// waiting in a worker's queue aren't processed either, so report them too.
+	queued, err := meter.Int64ObservableGauge("processor.queued",
+		metric.WithDescription("Events fetched from Kafka and waiting for a partition worker"),
+		metric.WithUnit("{message}"))
+	if err != nil {
+		return nil, err
+	}
 	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(queued, buffered.Load(), metric.WithAttributes(attribute.String("group", groupID)))
 		return observeLag(consumer, groupID, func(v int64, opts ...metric.ObserveOption) {
 			o.ObserveInt64(lag, v, opts...)
 		})
-	}, lag)
+	}, lag, queued)
 	if err != nil {
 		return nil, err
 	}
 
-	return &instruments{processed: processed, retries: retries, latency: latency, lagRegistration: reg}, nil
+	return &instruments{processed: processed, retries: retries, latency: latency, batchSize: batchSize, stage: stage, lagRegistration: reg}, nil
 }
 
 func observeLag(c *kafka.Consumer, groupID string, observe func(int64, ...metric.ObserveOption)) error {

@@ -80,7 +80,7 @@
     {
       "type": "timeseries",
       "title": "Consumer lag",
-      "description": "Messages not yet processed, per consumer group.",
+      "description": "Messages not yet fetched, per consumer group. Fetched events still waiting in workers are in the \"queued\" panel.",
       "gridPos": {
         "x": 0,
         "y": 9,
@@ -242,6 +242,66 @@
         {
           "refId": "A",
           "expr": "sum(stream_subscribers)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Where latency goes (p99 by stage)",
+      "description": "kafka: created to fetched. queue: fetched to batch start. apply: batch start to committed.",
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 16,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{stage}}",
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(transaction_stage_latency_milliseconds_bucket[30s])))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Batch size and queued events",
+      "gridPos": {
+        "x": 16,
+        "y": 35,
+        "w": 8,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "avg batch size",
+          "expr": "sum(rate(processor_batch_size_sum[30s])) / sum(rate(processor_batch_size_count[30s]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "queued in workers",
+          "expr": "sum(processor_queued)"
         }
       ]
     }

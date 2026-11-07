@@ -39,6 +39,8 @@ func run() error {
 		}
 	}()
 
+	telemetry.StartPprof()
+
 	p, err := processor.New(ctx, processor.DefaultConfig())
 	if err != nil {
 		return err
